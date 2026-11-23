@@ -122,6 +122,6 @@ describe("AC-8: CLI", () => {
   it("AC-8: unknown commands print usage and fail", () => {
     const r = cli("frobnicate");
     expect(r.code).toBe(1);
-    expect(r.out).toContain("Commands:");
+    expect(r.out).toContain("Server commands:");
   });
 });

@@ -35,11 +35,11 @@ Create one token per machine or client:
 npx agenttaskservice token add laptop
 ```
 
-Add the server to Claude Code (user scope, so every project sees it):
+Then set up each machine that runs Claude Code (see [Client setup](#client-setup)):
 
 ```sh
-claude mcp add --scope user --transport http agenttaskservice http://127.0.0.1:7420/mcp \
-  --header "Authorization: Bearer <token>"
+npm install -g agenttaskservice
+agenttaskservice init --url https://tasks.example.com --token <token>
 ```
 
 Register the projects that receive tasks, so others can find them:
@@ -103,6 +103,42 @@ or `AGENTTASK_CONFIG`). See [`examples/server.toml`](examples/server.toml).
 
 Example service units are in [`examples/`](examples/).
 
+## Client setup
+
+`agenttaskservice init` connects one machine to a server. It checks the server and
+the token, lists what it will change, and asks before writing anything:
+
+- stores the token in the macOS Keychain, the Linux secret service (`secret-tool`),
+  or a file readable only by you, in that order of preference;
+- writes `$XDG_CONFIG_HOME/agenttaskservice/client.toml` (server URL, optional
+  workspace root; never the token);
+- registers the MCP server with Claude Code at user scope. Claude Code gets the
+  token from `agenttaskservice auth-header`, so it is not stored in Claude Code's config;
+- adds a `SessionStart` hook to `~/.claude/settings.json`, keeping your other hooks;
+- with `--rule`, adds a short task rule to `~/.claude/CLAUDE.md` (otherwise it prints it).
+
+Use `--dry-run` to only list the changes, `--yes` to skip the prompt. Running it
+again is safe: it changes only what differs.
+
+At every session start the hook prints the project's open tasks and the tasks it
+sent that have finished, so Claude sees them before you type. It waits at most
+2 seconds and never blocks the session: if the server is down it prints one line.
+
+**Which project am I?** The first match wins:
+
+1. `AGENTTASK_PROJECT` environment variable
+2. a `.agenttask` file with `project = "<id>"`, in the folder or a parent up to the git root
+3. `workspace_root` in `client.toml`: the first folder under it
+4. the git remote `origin` repository name
+5. the git root folder name, then the current folder name
+
+`agenttaskservice whoami` shows the result.
+
+**Offline:** when the server can't be reached, `agenttaskservice task create|note|complete|reject`
+queue the change in `$XDG_STATE_HOME/agenttaskservice/outbox.jsonl`. `agenttaskservice flush`
+or the next session start sends it. A change the server refuses on replay (for example,
+someone else finished the task first) is reported and dropped.
+
 ## CLI
 
 ```text
@@ -110,7 +146,25 @@ agenttaskservice serve
 agenttaskservice token add <name> | token list | token revoke <name>
 agenttaskservice project add <id> [--name N] [--description D] [--alias A ...]
 agenttaskservice project list
+
+agenttaskservice init [--url U] [--token T] [--workspace-root D] [--rule] [--yes] [--dry-run]
+agenttaskservice whoami | flush | auth-header | hook session-start
+agenttaskservice task create --to P --title T [--body B|-] [--priority 1|2|3]
+agenttaskservice task list [--sent] | show <id> | claim <id> | note <id> <text>
+agenttaskservice task complete <id> --result R | reject <id> --reason R
 ```
+
+Task commands accept `--project P`. Without `--version`, complete, reject and claim
+act on the task as it is when the command is sent.
+
+| Client env var | Purpose |
+| --- | --- |
+| `AGENTTASK_URL` | Server URL (overrides `client.toml`) |
+| `AGENTTASK_TOKEN` | Token (overrides the stored one) |
+| `AGENTTASK_PROJECT` | Project id for this shell |
+| `AGENTTASK_WORKSPACE_ROOT` | Workspace root (overrides `client.toml`) |
+| `AGENTTASK_TOKEN_STORE` | `keychain`, `secret-tool` or `file` |
+| `AGENTTASK_CLIENT_CONFIG` | Path to `client.toml` |
 
 ## Development
 
