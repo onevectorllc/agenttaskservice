@@ -5,6 +5,8 @@ import type { Server } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { CLIENT_USAGE, runClient } from "./client/commands.js";
+import { runInit } from "./client/init.js";
 import { isLoopback, loadConfig } from "./config.js";
 import { openDb } from "./db.js";
 import { startServer } from "./server.js";
@@ -12,7 +14,7 @@ import { Store, TaskError } from "./store.js";
 
 const USAGE = `agenttaskservice <command>
 
-Commands:
+Server commands:
   serve                         Start the server
   token add <name>              Create a client token (shown once)
   token list                    List tokens
@@ -22,7 +24,21 @@ Commands:
 
 Options:
   --config <path>               Config file (default: $XDG_CONFIG_HOME/agenttaskservice/server.toml)
-`;
+
+${CLIENT_USAGE}`;
+
+const SERVER_COMMANDS = new Set(["serve", "token", "project"]);
+
+/** Entry point for every command. Client commands are async; server ones are not. */
+export async function main(argv: string[], out: (s: string) => void = console.log): Promise<number> {
+  const cmd = argv.find((a) => !a.startsWith("-"));
+  if (cmd === "init") return runInit(argv.slice(argv.indexOf("init") + 1), out);
+  if (cmd && !SERVER_COMMANDS.has(cmd)) {
+    const code = await runClient(argv, out);
+    if (code !== undefined) return code;
+  }
+  return run(argv, out);
+}
 
 export interface RunHooks {
   /** Called with the listening server after `serve` starts (used by tests). */
@@ -111,5 +127,11 @@ export function run(argv: string[], out: (s: string) => void = console.log, hook
 
 const entry = process.argv[1];
 if (entry && realpathSync(entry) === fileURLToPath(import.meta.url)) {
-  process.exitCode = run(process.argv.slice(2));
+  main(process.argv.slice(2)).then(
+    (code) => (process.exitCode = code),
+    (e) => {
+      console.error(`error: ${e instanceof Error ? e.message : e}`);
+      process.exitCode = 1;
+    },
+  );
 }
