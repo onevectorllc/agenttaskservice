@@ -1,0 +1,15 @@
+# systemd user unit. Install:
+#   mkdir -p ~/.config/systemd/user && cp agenttaskservice.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now agenttaskservice
+#   loginctl enable-linger "$USER"   # keep it running when logged out
+[Unit]
+Description=agenttaskservice
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/env npx --yes agenttaskservice serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
