@@ -19,7 +19,7 @@ so Claude Code and other MCP clients can call it directly.
 
 ## Quick start
 
-Requires Node.js 20 or newer.
+Requires Node.js 22 or newer.
 
 ```sh
 npx agenttaskservice serve
