@@ -99,11 +99,25 @@ export class Store {
       .run(taskId, kind, actor, text, this.iso());
   }
 
-  private checkVersion(t: Task, version: number | undefined): void {
-    if (version !== undefined && version !== t.version) {
+  private checkVersion(t: Task, version: number): void {
+    if (!Number.isInteger(version)) throw new TaskError("invalid", "version is required: pass the version of the task you last read");
+    if (version !== t.version) {
       throw new TaskError("conflict", `Task ${t.id} changed: you have version ${version}, current is ${t.version}`, {
         task: t,
       });
+    }
+  }
+
+  /** While a live claim exists, only its holder may finish, release or renew it. */
+  private holds(t: Task, actor: string, session?: string): boolean {
+    if (t.status !== "claimed" || !t.claimed_by) return true;
+    if (session) return t.claimed_by === `${actor}/${session}`;
+    return t.claimed_by === actor || t.claimed_by.startsWith(`${actor}/`);
+  }
+
+  private mustHold(t: Task, actor: string, session?: string): void {
+    if (!this.holds(t, actor, session)) {
+      throw new TaskError("conflict", `Task ${t.id} is claimed by ${t.claimed_by}`, { task: t });
     }
   }
 
@@ -232,7 +246,7 @@ export class Store {
     return rows.map((t) => this.effective(t)).filter((t) => !statuses || statuses.includes(t.status));
   }
 
-  claimTask(actor: string, project: string, id: string, version?: number, session?: string): Task {
+  claimTask(actor: string, project: string, id: string, version: number, session?: string): Task {
     return this.db.transaction(() => {
       const t = this.mustGet(id);
       if (t.to_project !== project) throw new TaskError("forbidden", `Task ${id} is for ${t.to_project}, not ${project}`);
@@ -245,33 +259,37 @@ export class Store {
     })();
   }
 
-  addNote(actor: string, id: string, text: string): Task {
+  /** Anyone may note a task; only the claim holder's note renews the lease. */
+  addNote(actor: string, id: string, text: string, session?: string): Task {
     return this.db.transaction(() => {
       const t = this.mustGet(id);
       if (!text.trim()) throw new TaskError("invalid", "Note text is required");
-      this.event(id, "note", actor, text);
-      if (t.status === "claimed") return this.write(t, { lease_until: this.iso(this.leaseMs) });
+      const who = session ? `${actor}/${session}` : actor;
+      this.event(id, "note", who, text);
+      if (t.status === "claimed" && this.holds(t, actor, session)) return this.write(t, { lease_until: this.iso(this.leaseMs) });
       return t;
     })();
   }
 
-  releaseTask(actor: string, project: string, id: string, version?: number): Task {
+  releaseTask(actor: string, project: string, id: string, version: number, session?: string): Task {
     return this.db.transaction(() => {
       const t = this.mustGet(id);
       if (t.to_project !== project) throw new TaskError("forbidden", `Task ${id} is for ${t.to_project}, not ${project}`);
       this.checkVersion(t, version);
       if (t.status !== "claimed") throw new TaskError("conflict", `Task ${id} is ${t.status}`, { task: t });
+      this.mustHold(t, actor, session);
       const out = this.write(t, { status: "open", claimed_by: null, lease_until: null });
       this.event(id, "released", actor);
       return out;
     })();
   }
 
-  completeTask(actor: string, project: string, id: string, version: number | undefined, result: string): Task {
+  completeTask(actor: string, project: string, id: string, version: number, result: string, session?: string): Task {
     return this.db.transaction(() => {
       const t = this.mustGet(id);
       if (t.to_project !== project) throw new TaskError("forbidden", `Task ${id} is for ${t.to_project}, not ${project}`);
       this.checkVersion(t, version);
+      this.mustHold(t, actor, session);
       if (!result.trim()) throw new TaskError("invalid", "A result is required to complete a task");
       if (t.status !== "open" && t.status !== "claimed") {
         throw new TaskError("conflict", `Task ${id} is already ${t.status}`, { task: t });
@@ -283,7 +301,7 @@ export class Store {
   }
 
   /** The receiver rejects a task, or the sender cancels its own. */
-  rejectTask(actor: string, project: string, id: string, reason: string, version?: number): Task {
+  rejectTask(actor: string, project: string, id: string, reason: string, version: number): Task {
     return this.db.transaction(() => {
       const t = this.mustGet(id);
       const isReceiver = t.to_project === project;

@@ -25,7 +25,9 @@ Requires Node.js 20 or newer.
 npx agenttaskservice serve
 ```
 
-The first start creates an `admin` token and prints it once. Keep it safe.
+The first start creates an `admin` token and saves it to `admin-token` in the
+data directory, readable only by you (it is never printed, so it can't end up in
+service logs). Copy it somewhere safe and delete the file.
 Create one token per machine or client:
 
 ```sh
@@ -61,8 +63,10 @@ npx agenttaskservice project add project-b --name "Project B" --description "Bui
 | `list_projects` | Known projects and what they do |
 
 Each tool takes `project`, the caller's project id (lowercase letters, digits,
-`.`, `_`, `-`). Pass `version` from the task you last read to make sure nobody
-changed it in the meantime.
+`.`, `_`, `-`). Claim, release, complete and reject require `version` from the
+task you last read, so nobody's change is overwritten. While a claim is live,
+only its holder (the same token, and the same `session` label if one was used)
+can complete or release the task, and only the holder's notes renew the lease.
 
 ## HTTP endpoints
 
@@ -84,7 +88,8 @@ or `AGENTTASK_CONFIG`). See [`examples/server.toml`](examples/server.toml).
 | `server.port` | `AGENTTASK_PORT` | `7420` |
 | `tls.cert`, `tls.key` | `AGENTTASK_TLS_CERT`, `AGENTTASK_TLS_KEY` | unset (plain HTTP) |
 | `storage.data_dir` | `AGENTTASK_DATA_DIR` | `~/.local/share/agenttaskservice` (Linux), `~/Library/Application Support/agenttaskservice` (macOS) |
-| `tasks.lease_hours` | `AGENTTASK_LEASE_HOURS` | `4` |
+| `tasks.lease_hours` | `AGENTTASK_LEASE_HOURS` | `4` (max 720) |
+| `server.max_body_bytes` | | `1000000` |
 
 ### Two ways to run it
 

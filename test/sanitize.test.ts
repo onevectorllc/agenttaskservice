@@ -25,7 +25,7 @@ function check(d: string, env: Record<string, string> = {}) {
 
 describe("AC-9: sanitize check", () => {
   it("AC-9: clean placeholders pass", () => {
-    const d = repo({ "a.md": "Run as /Users/alice/x or /home/you/x. Mail noreply@example.com. Host 127.0.0.1." });
+    const d = repo({ "a.md": "Run as /Users/alice/x or /home/you/x. Mail noreply@example.com. Host 127.0.0.1, api.example.internal." });
     expect(check(d).code).toBe(0);
   });
 
@@ -38,11 +38,12 @@ describe("AC-9: sanitize check", () => {
         ["server 192", "168", "1", "20"].join("."),
         ["-----BEGIN OPENSSH", "PRIVATE KEY-----"].join(" "),
         `token ats_${"x".repeat(40)}`,
+        ["ssh build-box", "internal"].join("."),
       ].join("\n"),
     });
     const r = check(d);
     expect(r.code).toBe(1);
-    for (const id of ["home-path", "email", "private-ip", "private-key", "token"]) expect(r.err).toContain(id);
+    for (const id of ["home-path", "email", "private-ip", "private-hostname", "private-key", "token"]) expect(r.err).toContain(id);
     expect(r.err).not.toContain("realperson");
   });
 

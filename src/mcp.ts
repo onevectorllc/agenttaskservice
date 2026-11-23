@@ -6,7 +6,8 @@ import { Store, TaskError, type Status } from "./store.js";
 const STATUSES = ["open", "claimed", "done", "rejected", "cancelled"] as const;
 const project = z.string().min(1).max(64).describe("Your project id (the caller), e.g. 'video-studio'");
 const taskId = z.string().min(1).max(32).describe("Task id, e.g. 'T-0042'");
-const version = z.number().int().positive().optional().describe("The task version you last saw; stale versions are refused");
+const version = z.number().int().positive().describe("The task version you last read; a stale version is refused");
+const session = z.string().max(64).optional().describe("Optional label for this session; use the same one you claimed with");
 
 type Result = { content: { type: "text"; text: string }[]; isError?: boolean };
 
@@ -22,7 +23,8 @@ function wrap<A>(fn: (args: A) => unknown): (args: A) => Promise<Result> {
       if (e instanceof TaskError) {
         return { content: [{ type: "text", text: JSON.stringify({ error: e.code, message: e.message, details: e.details }, null, 2) }], isError: true };
       }
-      throw e;
+      console.error("tool failed:", e instanceof Error ? e.message : e);
+      return { content: [{ type: "text", text: JSON.stringify({ error: "internal", message: "Internal error" }) }], isError: true };
     }
   };
 }
@@ -85,7 +87,7 @@ export function createMcpServer(store: Store, actor: string): McpServer {
     "claim_task",
     {
       description: "Take a task before working on it. The claim lasts a few hours; add_note renews it.",
-      inputSchema: { project, task_id: taskId, version, session: z.string().max(64).optional().describe("Optional label for this session") },
+      inputSchema: { project, task_id: taskId, version, session },
     },
     wrap((a) => ({ task: store.claimTask(actor, a.project, a.task_id, a.version, a.session) })),
   );
@@ -93,28 +95,28 @@ export function createMcpServer(store: Store, actor: string): McpServer {
   server.registerTool(
     "add_note",
     {
-      description: "Add a progress note to a task. Renews your claim.",
-      inputSchema: { task_id: taskId, text: z.string().min(1).max(20000) },
+      description: "Add a progress note to a task. Renews the claim when you hold it.",
+      inputSchema: { task_id: taskId, text: z.string().min(1).max(20000), session },
     },
-    wrap((a) => ({ task: store.addNote(actor, a.task_id, a.text) })),
+    wrap((a) => ({ task: store.addNote(actor, a.task_id, a.text, a.session) })),
   );
 
   server.registerTool(
     "release_task",
     {
       description: "Give a claimed task back so it is open again.",
-      inputSchema: { project, task_id: taskId, version },
+      inputSchema: { project, task_id: taskId, version, session },
     },
-    wrap((a) => ({ task: store.releaseTask(actor, a.project, a.task_id, a.version) })),
+    wrap((a) => ({ task: store.releaseTask(actor, a.project, a.task_id, a.version, a.session) })),
   );
 
   server.registerTool(
     "complete_task",
     {
       description: "Mark a task done. The result should say what was done and link any PR.",
-      inputSchema: { project, task_id: taskId, version, result: z.string().min(1).max(20000) },
+      inputSchema: { project, task_id: taskId, version, result: z.string().min(1).max(20000), session },
     },
-    wrap((a) => ({ task: store.completeTask(actor, a.project, a.task_id, a.version, a.result) })),
+    wrap((a) => ({ task: store.completeTask(actor, a.project, a.task_id, a.version, a.result, a.session) })),
   );
 
   server.registerTool(

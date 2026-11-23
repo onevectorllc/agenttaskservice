@@ -76,6 +76,20 @@ describe("AC-5: auth", () => {
     expect(r.status).toBe(413);
   });
 
+  it("AC-5: an oversized chunked MCP body (no Content-Length) is refused", async () => {
+    const { request } = await import("node:http");
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = request(`${base}/mcp`, { method: "POST", headers: { authorization: `Bearer ${laptop}`, "content-type": "application/json" } }, (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      });
+      req.on("error", reject);
+      for (let i = 0; i < 30; i++) req.write("x".repeat(1000));
+      req.end();
+    });
+    expect(status).toBe(413);
+  });
+
   it("AC-5: unknown paths are 404 and GET /mcp is 405", async () => {
     const h = { authorization: `Bearer ${laptop}` };
     expect((await fetch(`${base}/nope`, { headers: h })).status).toBe(404);
@@ -116,19 +130,23 @@ describe("AC-6: MCP tools end to end", () => {
     const claimed = await call(b, "claim_task", { project: "project-b", task_id: id, version: 1, session: "s1" });
     expect(claimed.value.task.claimed_by).toBe("mini/s1");
 
+    const inboxB = await (await fetch(`${base}/v1/inbox?project=project-b`, { headers: { authorization: `Bearer ${mini}` } })).json();
+    expect(inboxB.tasks.map((t: { id: string; status: string }) => `${t.id}:${t.status}`)).toContain(`${id}:claimed`);
+
     const stale = await call(a, "complete_task", { project: "project-b", task_id: id, version: 1, result: "x" });
     expect(stale.error).toBe(true);
     expect(stale.value.error).toBe("conflict");
 
-    await call(b, "add_note", { task_id: id, text: "halfway" });
-    const done = await call(b, "complete_task", { project: "project-b", task_id: id, result: "PR 18 merged" });
+    await call(b, "add_note", { task_id: id, text: "halfway", session: "s1" });
+    const cur = (await call(b, "get_task", { task_id: id })).value.task.version;
+    const done = await call(b, "complete_task", { project: "project-b", task_id: id, version: cur, result: "PR 18 merged", session: "s1" });
     expect(done.value.task.status).toBe("done");
 
     const detail = await call(a, "get_task", { task_id: id });
     expect(detail.value.events.map((e: { kind: string; actor: string }) => `${e.kind}:${e.actor}`)).toEqual([
       "created:laptop",
       "claimed:mini/s1",
-      "note:mini",
+      "note:mini/s1",
       "completed:mini",
     ]);
 

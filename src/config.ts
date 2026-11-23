@@ -65,7 +65,10 @@ export function loadConfig(path?: string, env: Env = process.env): Config {
   if (cfg.tlsKey) cfg.tlsKey = expandHome(cfg.tlsKey);
 
   if (!Number.isInteger(cfg.port) || cfg.port < 0 || cfg.port > 65535) throw new Error(`Invalid port: ${cfg.port}`);
-  if (!(cfg.leaseHours > 0)) throw new Error(`Invalid lease_hours: ${cfg.leaseHours}`);
+  if (!(cfg.leaseHours > 0 && cfg.leaseHours <= 720)) throw new Error(`Invalid lease_hours (0 < hours <= 720): ${cfg.leaseHours}`);
+  if (!Number.isInteger(cfg.maxBodyBytes) || cfg.maxBodyBytes < 1024 || cfg.maxBodyBytes > 100_000_000) {
+    throw new Error(`Invalid server.max_body_bytes (whole bytes, 1024 to 100000000): ${server.max_body_bytes}`);
+  }
   if (Boolean(cfg.tlsCert) !== Boolean(cfg.tlsKey)) throw new Error("Set both tls.cert and tls.key, or neither");
   return cfg;
 }

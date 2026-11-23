@@ -36,6 +36,11 @@ const RULES = [
   },
   { id: "email", re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, ok: (m) => EMAIL_OK.some((r) => r.test(m[0])) },
   { id: "private-ip", re: /\b(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b/g },
+  {
+    id: "private-hostname",
+    re: /\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:local|lan|internal|intranet|corp|localdomain|home\.arpa)\b/gi,
+    ok: (m) => /^(?:[a-z0-9-]+\.)*example\./i.test(m[0]),
+  },
   { id: "private-key", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/g },
   { id: "token", re: /\b(?:ats_[A-Za-z0-9_-]{30,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|sk-[A-Za-z0-9-]{30,}|AKIA[0-9A-Z]{16}|xox[abp]-[A-Za-z0-9-]{20,})/g },
 ];

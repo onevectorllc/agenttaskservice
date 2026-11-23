@@ -4,7 +4,9 @@
 
 - Every endpoint except `GET /health` requires a bearer token.
 - Tokens are random 256-bit values. The server stores only their SHA-256 hash
-  and shows a new token once. Revoke one with `agenttaskservice token revoke <name>`.
+  and shows a new token once. A token is checked by looking up its hash, so the
+  comparison never runs over the secret itself. The first admin token is written
+  to a file readable only by its owner, never to stdout or logs. Revoke one with `agenttaskservice token revoke <name>`.
 - All tokens belong to one trust domain: any valid token may act for any project.
   Give tokens only to machines and clients you control. Per-project permissions
   are not part of this version.

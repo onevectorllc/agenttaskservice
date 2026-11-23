@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
-import { realpathSync } from "node:fs";
+import { chmodSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -47,9 +47,12 @@ export function run(argv: string[], out: (s: string) => void = console.log): num
   try {
     if (cmd === "serve") {
       if (store.countActiveTokens() === 0) {
-        const token = store.addToken("admin");
-        out("No tokens yet. Created the 'admin' token. It is shown only this once; store it safely:");
-        out(`  ${token}`);
+        // Never print the token: service managers keep stdout in their logs.
+        const file = join(cfg.dataDir, "admin-token");
+        writeFileSync(file, `${store.addToken("admin")}\n`, { mode: 0o600 });
+        chmodSync(file, 0o600);
+        out(`No tokens yet. Created the 'admin' token and saved it to ${file} (readable only by you).`);
+        out("Copy it somewhere safe, then delete that file.");
       }
       if (!isLoopback(cfg.host) && !cfg.tlsCert) {
         console.warn(`warning: listening on ${cfg.host} without TLS. Use a TLS reverse proxy or set tls.cert and tls.key.`);

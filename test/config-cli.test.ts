@@ -32,6 +32,13 @@ describe("AC-7: config", () => {
     expect(c).toMatchObject({ host: "0.0.0.0", port: 9000, dataDir: "/srv/ats", leaseHours: 2 });
   });
 
+  it("AC-7: a mistyped body limit or lease length is an error, not a silent default", () => {
+    const file = join(dir, "bad.toml");
+    writeFileSync(file, `[server]\nmax_body_bytes = "1MB"\n`);
+    expect(() => loadConfig(file, {})).toThrow(/max_body_bytes/);
+    expect(() => loadConfig(undefined, { ...noFile, AGENTTASK_LEASE_HOURS: "100000" })).toThrow(/lease_hours/);
+  });
+
   it("AC-7: a missing explicit file, a half TLS setting and a bad port are errors", () => {
     expect(() => loadConfig(join(dir, "missing.toml"), {})).toThrow(/not found/);
     expect(() => loadConfig(undefined, { ...noFile, AGENTTASK_TLS_CERT: "/x.pem" })).toThrow(/both/);

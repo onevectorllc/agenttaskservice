@@ -16,6 +16,9 @@ beforeEach(() => {
 const create = (extra: Record<string, unknown> = {}) =>
   store.createTask("laptop", { from_project: "project-a", to_project: "project-b", title: "Do the thing", ...extra }).task;
 
+/** The task's current version. */
+const v = (id: string) => store.getTask(id).task.version;
+
 function expectError(fn: () => unknown, code: TaskError["code"]): void {
   try {
     fn();
@@ -88,21 +91,21 @@ describe("AC-2: claims and leases", () => {
 
   it("AC-2: only the receiving project can claim", () => {
     const t = create();
-    expectError(() => store.claimTask("mini", "project-a", t.id), "forbidden");
+    expectError(() => store.claimTask("mini", "project-a", t.id, v(t.id)), "forbidden");
   });
 
   it("AC-2: an expired lease makes the task open again and claimable", () => {
     const t = create();
-    store.claimTask("mini", "project-b", t.id);
+    store.claimTask("mini", "project-b", t.id, v(t.id));
     clock = new Date(clock.getTime() + 61_000);
     expect(store.getTask(t.id).task.status).toBe("open");
-    const again = store.claimTask("laptop", "project-b", t.id);
+    const again = store.claimTask("laptop", "project-b", t.id, v(t.id));
     expect(again.claimed_by).toBe("laptop");
   });
 
   it("AC-2: a note renews the lease", () => {
     const t = create();
-    store.claimTask("mini", "project-b", t.id);
+    store.claimTask("mini", "project-b", t.id, v(t.id));
     clock = new Date(clock.getTime() + 50_000);
     store.addNote("mini", t.id, "halfway");
     clock = new Date(clock.getTime() + 50_000);
@@ -111,16 +114,62 @@ describe("AC-2: claims and leases", () => {
 
   it("AC-2: release opens a claimed task again", () => {
     const t = create();
-    store.claimTask("mini", "project-b", t.id);
-    expect(store.releaseTask("mini", "project-b", t.id).status).toBe("open");
+    store.claimTask("mini", "project-b", t.id, v(t.id));
+    expect(store.releaseTask("mini", "project-b", t.id, v(t.id)).status).toBe("open");
+  });
+});
+
+describe("AC-2/AC-3: versions and claim holders", () => {
+  it("AC-2: claim, complete, release and reject refuse a missing version", () => {
+    const t = create();
+    const missing = undefined as unknown as number;
+    expectError(() => store.claimTask("mini", "project-b", t.id, missing), "invalid");
+    expectError(() => store.completeTask("mini", "project-b", t.id, missing, "ok"), "invalid");
+    expectError(() => store.rejectTask("mini", "project-b", t.id, "no", missing), "invalid");
+    store.claimTask("mini", "project-b", t.id, v(t.id));
+    expectError(() => store.releaseTask("mini", "project-b", t.id, missing), "invalid");
+  });
+
+  it("AC-2: only the claim holder can complete or release; others get conflict", () => {
+    const t = create();
+    store.claimTask("mini", "project-b", t.id, v(t.id), "s1");
+    expectError(() => store.completeTask("laptop", "project-b", t.id, v(t.id), "mine now"), "conflict");
+    expectError(() => store.releaseTask("laptop", "project-b", t.id, v(t.id)), "conflict");
+    expectError(() => store.completeTask("mini", "project-b", t.id, v(t.id), "x", "other-session"), "conflict");
+    expect(store.completeTask("mini", "project-b", t.id, v(t.id), "done", "s1").claimed_by).toBe("mini/s1");
+  });
+
+  it("AC-2: a note from someone else is recorded but does not renew the lease", () => {
+    const t = create();
+    store.claimTask("mini", "project-b", t.id, v(t.id));
+    clock = new Date(clock.getTime() + 50_000);
+    store.addNote("laptop", t.id, "nudge");
+    clock = new Date(clock.getTime() + 20_000);
+    expect(store.getTask(t.id).task.status).toBe("open");
+    expect(store.getTask(t.id).events.map((e) => e.kind)).toContain("note");
+  });
+
+  it("AC-2: after a lease expires, anyone in the project may complete it", () => {
+    const t = create();
+    store.claimTask("mini", "project-b", t.id, v(t.id));
+    clock = new Date(clock.getTime() + 61_000);
+    expect(store.completeTask("laptop", "project-b", t.id, v(t.id), "picked up").status).toBe("done");
+  });
+
+  it("AC-4: release and cancel are recorded in the history", () => {
+    const t = create();
+    store.claimTask("mini", "project-b", t.id, v(t.id));
+    store.releaseTask("mini", "project-b", t.id, v(t.id));
+    store.rejectTask("laptop", "project-a", t.id, "not needed", v(t.id));
+    expect(store.getTask(t.id).events.map((e) => e.kind)).toEqual(["created", "claimed", "released", "cancelled"]);
   });
 });
 
 describe("AC-3: completion", () => {
   it("AC-3: completing needs a result", () => {
     const t = create();
-    expectError(() => store.completeTask("mini", "project-b", t.id, undefined, "  "), "invalid");
-    const done = store.completeTask("mini", "project-b", t.id, undefined, "Merged PR 18");
+    expectError(() => store.completeTask("mini", "project-b", t.id, v(t.id), "  "), "invalid");
+    const done = store.completeTask("mini", "project-b", t.id, v(t.id), "Merged PR 18");
     expect(done.status).toBe("done");
     expect(done.result).toBe("Merged PR 18");
     expect(done.done_at).not.toBeNull();
@@ -128,7 +177,7 @@ describe("AC-3: completion", () => {
 
   it("AC-3: a stale version is refused with the current task", () => {
     const t = create();
-    store.claimTask("mini", "project-b", t.id);
+    store.claimTask("mini", "project-b", t.id, v(t.id));
     try {
       store.completeTask("laptop", "project-b", t.id, t.version, "done");
       throw new Error("expected conflict");
@@ -140,17 +189,17 @@ describe("AC-3: completion", () => {
 
   it("AC-3: a finished task cannot be completed again", () => {
     const t = create();
-    store.completeTask("mini", "project-b", t.id, undefined, "ok");
-    expectError(() => store.completeTask("mini", "project-b", t.id, undefined, "again"), "conflict");
+    store.completeTask("mini", "project-b", t.id, v(t.id), "ok");
+    expectError(() => store.completeTask("mini", "project-b", t.id, v(t.id), "again"), "conflict");
   });
 });
 
 describe("AC-4: notes, reject, history, projects", () => {
   it("AC-4: every change is recorded in the history, in order", () => {
     const t = create();
-    store.claimTask("mini", "project-b", t.id);
+    store.claimTask("mini", "project-b", t.id, v(t.id));
     store.addNote("mini", t.id, "working");
-    store.completeTask("mini", "project-b", t.id, undefined, "done");
+    store.completeTask("mini", "project-b", t.id, v(t.id), "done");
     const { events } = store.getTask(t.id);
     expect(events.map((e) => e.kind)).toEqual(["created", "claimed", "note", "completed"]);
     expect(events[2]).toMatchObject({ actor: "mini", text: "working" });
@@ -167,13 +216,13 @@ describe("AC-4: notes, reject, history, projects", () => {
 
   it("AC-4: the receiver rejects, the sender cancels, others are refused", () => {
     const a = create();
-    expect(store.rejectTask("mini", "project-b", a.id, "wrong project").status).toBe("rejected");
+    expect(store.rejectTask("mini", "project-b", a.id, "wrong project", v(a.id)).status).toBe("rejected");
     const b = create();
-    expect(store.rejectTask("laptop", "project-a", b.id, "not needed").status).toBe("cancelled");
+    expect(store.rejectTask("laptop", "project-a", b.id, "not needed", v(b.id)).status).toBe("cancelled");
     const c = create();
     store.ensureProject("project-c");
-    expectError(() => store.rejectTask("x", "project-c", c.id, "meh"), "forbidden");
-    expectError(() => store.rejectTask("mini", "project-b", c.id, " "), "invalid");
+    expectError(() => store.rejectTask("x", "project-c", c.id, "meh", v(c.id)), "forbidden");
+    expectError(() => store.rejectTask("mini", "project-b", c.id, " ", v(c.id)), "invalid");
   });
 
   it("AC-4: unknown task ids are not_found", () => {
@@ -193,8 +242,8 @@ describe("AC-6: unseen completions for the sender", () => {
     const a = create();
     const b = create();
     create();
-    store.completeTask("mini", "project-b", a.id, undefined, "ok");
-    store.rejectTask("mini", "project-b", b.id, "no");
+    store.completeTask("mini", "project-b", a.id, v(a.id), "ok");
+    store.rejectTask("mini", "project-b", b.id, "no", v(b.id));
     expect(store.takeUnseenCompletions("project-a").map((t) => t.id)).toEqual([a.id, b.id]);
     expect(store.takeUnseenCompletions("project-a")).toEqual([]);
   });
