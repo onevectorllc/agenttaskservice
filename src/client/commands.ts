@@ -49,6 +49,7 @@ function line(t: any): string {
 export const HOOK_BUDGET_MS = 4000;
 /** Past this the hook prints one line and returns, even mid-request. */
 export const HOOK_HARD_LIMIT_MS = 7000;
+const hardLimit = (env: Env) => Number(env.AGENTTASK_HOOK_LIMIT_MS) || HOOK_HARD_LIMIT_MS;
 
 /** Text for the session's context. A hook must not break or stall a session. */
 export async function sessionStart(cwd: string, env: Env = process.env): Promise<string> {
@@ -179,10 +180,17 @@ export async function runClient(argv: string[], out: Out = console.log, env: Env
       // Hard stop well inside Claude Code's 10 s hook limit, whatever the network does.
       let timer: NodeJS.Timeout | undefined;
       const limit = new Promise<string>((resolve) => {
-        timer = setTimeout(() => resolve("agenttaskservice: the server was too slow; tasks not checked."), HOOK_HARD_LIMIT_MS);
+        timer = setTimeout(() => resolve("agenttaskservice: the server was too slow; tasks not checked."), hardLimit(env));
       });
-      out(await Promise.race([hookCwd(env).then((cwd) => sessionStart(cwd, env)), limit]));
+      const TIMED_OUT = Symbol("timeout");
+      const result = await Promise.race([hookCwd(env).then((cwd) => sessionStart(cwd, env)), limit.then((l) => [TIMED_OUT, l] as const)]);
       clearTimeout(timer);
+      if (Array.isArray(result) && result[0] === TIMED_OUT) {
+        // Requests may still be in flight; leave now so Claude Code gets the line before its own limit.
+        process.stdout.write(`${result[1]}\n`, () => process.exit(0));
+        return new Promise<number>(() => {});
+      }
+      out(result as string);
     } catch (e) {
       out(`agenttaskservice: hook failed (${firstLine(e)}); tasks not checked.`);
     }

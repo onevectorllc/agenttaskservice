@@ -149,7 +149,10 @@ there is something to do, in `--work-dir` (default: the current folder). Task te
 from other machines, so that session is boxed in: only file read and edit tools exist (no
 shell, web or subagents), they are approved only inside the work folder, your user-level
 Claude Code settings are not loaded, the only MCP server is this one, and it cannot create
-new tasks. Claude Code versions with `--restricted` get that mode too. Claude claims each task and either
+new tasks. Claude Code's hooks are off for that run, and it can never write files that would
+run commands later (`.claude/`, `settings*.json`, `.mcp.json`, `.git/`). Claude Code versions
+with `--restricted` get that mode too. The work folder can't be your home folder or hold
+Claude Code's config folder. Claude claims each task and either
 completes it, or, when the request is unclear or conflicts with what is there, adds a note
 starting `needs-owner:` and leaves it open; later runs skip it until someone replies.
 Put inbox-specific instructions in a file and pass it with `--work-prompt <file>`.

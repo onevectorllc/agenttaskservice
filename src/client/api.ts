@@ -216,9 +216,12 @@ export function takeMarker(file: string, staleMs: number): boolean {
       if (!st) continue;
       const pid = Number(readFileSync(file, "utf8").trim());
       const fresh = Date.now() - st.mtimeMs < staleMs;
-      if (pid > 0 ? pidAlive(pid) && pid !== process.pid : fresh) return false;
-      if (pid === process.pid && fresh) return false;
-      rmSync(file, { force: true });
+      // Held while fresh and its holder runs (or its pid is not written yet). Past staleMs it is
+      // stale even with a live pid, which may be a reused one; holders refresh the file to stay fresh.
+      if (fresh && (pid > 0 ? pidAlive(pid) : true)) return false;
+      // Remove only the file we judged: if another process replaced it meanwhile, leave theirs.
+      const now = statSync(file, { throwIfNoEntry: false });
+      if (now && now.ino === st.ino && now.mtimeMs === st.mtimeMs) rmSync(file, { force: true });
     }
   }
   return false;

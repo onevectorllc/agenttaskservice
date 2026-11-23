@@ -6,6 +6,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { platform } from "node:os";
 import { PROJECT_ID } from "../store.js";
 import { scheduleSteps } from "./schedule.js";
+import { workDirProblem } from "./work.js";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { parseArgs } from "node:util";
@@ -254,6 +255,11 @@ export async function runInit(argv: string[], out: Out = console.log, env: Env =
   }
 
   if (values.work) {
+    const bad = workDirProblem(expandHome(values["work-dir"] ?? process.cwd()), env);
+    if (bad && every > 0) {
+      out(`error: ${bad}`);
+      return 1;
+    }
     try {
       steps.push(
         ...scheduleSteps(

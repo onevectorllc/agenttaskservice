@@ -11,7 +11,9 @@ import { saveClientConfig, stateDir, urlProblem } from "../src/client/config.js"
 import { runInit, shellQuote } from "../src/client/init.js";
 import { launchdPlist, systemdUnits, type WorkJob } from "../src/client/schedule.js";
 import { writeToken } from "../src/client/token.js";
-import { claudeArgs, NEEDS_OWNER, runWork, waitsForOwner, workPrompt } from "../src/client/work.js";
+import { claudeArgs, NEEDS_OWNER, runWork, waitsForOwner, workDirProblem, workPrompt } from "../src/client/work.js";
+import { spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import { openDb } from "../src/db.js";
 import { startServer } from "../src/server.js";
 import { Store } from "../src/store.js";
@@ -39,11 +41,14 @@ let env: Env;
 let home: string;
 let fakeBin: string;
 let claudeLog: string;
+let workDir: string;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "ats-q-"));
   fakeBin = join(home, "bin");
   claudeLog = join(home, "claude.log");
+  workDir = join(home, "work");
+  mkdirSync(workDir);
   mkdirSync(fakeBin);
   // Fake `claude`: records each call's arguments, one per line, then a separator.
   writeFileSync(join(fakeBin, "claude"), `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a" >> '${claudeLog}'; done\necho --- >> '${claudeLog}'\n`);
@@ -188,7 +193,7 @@ describe("AC-18: scheduled work", () => {
   it("AC-18: runs claude only when there is work, and skips tasks waiting for the owner", async () => {
     online();
     const c0 = capture();
-    expect(await runWork(["--inbox", "wk", "--dir", home], c0.out, env)).toBe(0);
+    expect(await runWork(["--inbox", "wk", "--dir", workDir], c0.out, env)).toBe(0);
     expect(c0.text()).toContain("nothing to do");
     expect(existsSync(claudeLog)).toBe(false);
 
@@ -198,14 +203,14 @@ describe("AC-18: scheduled work", () => {
     store.addNote("client-a", waiting.id, `${NEEDS_OWNER} which file?`);
     store.releaseTask("client-a", "wk", waiting.id, store.getTask(waiting.id).task.version);
     const c1 = capture();
-    expect(await runWork(["--inbox", "wk", "--dir", home], c1.out, env)).toBe(0);
+    expect(await runWork(["--inbox", "wk", "--dir", workDir], c1.out, env)).toBe(0);
     expect(c1.text()).toContain("1 waiting for the owner");
     expect(existsSync(claudeLog)).toBe(false);
 
     const t = store.createTask("client-b", { from_project: "qb", to_project: "wk", title: "Clear request" }).task;
     writeFileSync(join(home, "prompt.md"), "Check the rules folder for conflicts first.");
     const c2 = capture();
-    expect(await runWork(["--inbox", "wk", "--dir", home, "--prompt-file", join(home, "prompt.md")], c2.out, env)).toBe(0);
+    expect(await runWork(["--inbox", "wk", "--dir", workDir, "--prompt-file", join(home, "prompt.md")], c2.out, env)).toBe(0);
     const log = readFileSync(claudeLog, "utf8");
     expect(log).toContain("-p\n");
     expect(log).toContain(t.id);
@@ -217,12 +222,12 @@ describe("AC-18: scheduled work", () => {
     // A reply from the sender after the needs-owner note puts the task back in the queue.
     store.addNote("client-b", waiting.id, "the README");
     rmSync(claudeLog);
-    await runWork(["--inbox", "wk", "--dir", home], capture().out, env);
+    await runWork(["--inbox", "wk", "--dir", workDir], capture().out, env);
     expect(readFileSync(claudeLog, "utf8")).toContain(waiting.id);
   });
 
   it("AC-18: the headless run is boxed in", () => {
-    const args = claudeArgs("do it", ["/opt/bin/agenttaskservice"], "https://tasks.example.com", true);
+    const args = claudeArgs("do it", ["/opt/bin/agenttaskservice"], "https://tasks.example.com", { restricted: true, promptsFlag: true });
     const opt = (k: string) => args[args.indexOf(k) + 1];
     expect(args).toContain("--restricted");
     expect(args).toContain("--strict-mcp-config");
@@ -237,7 +242,51 @@ describe("AC-18: scheduled work", () => {
       url: "https://tasks.example.com/mcp",
       headersHelper: "/opt/bin/agenttaskservice auth-header",
     });
-    expect(claudeArgs("x", ["a"], "https://h", false)).not.toContain("--restricted");
+    expect(opt("--permission-prompts")).toBe("none");
+  });
+
+  it("AC-18: without --restricted, files that would run commands later stay unwritable and hooks are off", () => {
+    const args = claudeArgs("x", ["a"], "https://h", { restricted: false, promptsFlag: false });
+    const opt = (k: string) => args[args.indexOf(k) + 1];
+    expect(args).not.toContain("--restricted");
+    expect(args).not.toContain("--permission-prompts");
+    expect(JSON.parse(opt("--settings"))).toEqual({ disableAllHooks: true });
+    const deny = opt("--disallowedTools").split(",");
+    for (const p of ["./.claude/**", "./**/settings*.json", "./.git/**", "./.mcp.json"]) {
+      expect(deny).toContain(`Edit(${p})`);
+      expect(deny).toContain(`Write(${p})`);
+    }
+  });
+
+  it("AC-18: the work folder can't be or hold Claude Code's config folder, or be home", async () => {
+    const e = { ...env, CLAUDE_CONFIG_DIR: join(home, ".claude") };
+    expect(workDirProblem(join(home, ".claude"), e)).toBeDefined();
+    expect(workDirProblem(join(home, ".claude", "x"), e)).toBeDefined();
+    expect(workDirProblem(home, e)).toBeDefined();
+    expect(workDirProblem(join(home, "rules"), e)).toBeUndefined();
+    const c = capture();
+    expect(await runInit(["--url", base, "--work", "wk", "--work-dir", home, "--yes"], c.out, { ...e, AGENTTASK_TOKEN: token, AGENTTASK_PLATFORM: "linux" })).toBe(1);
+    expect(c.text()).toContain("work folder");
+  });
+
+  const cli = join(process.cwd(), "dist", "cli.js");
+  it.skipIf(!existsSync(cli))("AC-13: the hook exits by its hard limit even when the server never answers", async () => {
+    const silent = createServer(() => {}); // accepts connections, never replies
+    await new Promise<void>((r) => silent.listen(0, "127.0.0.1", () => r()));
+    const port = (silent.address() as AddressInfo).port;
+    saveClientConfig({ url: `http://127.0.0.1:${port}`, tokenStore: "file" }, env);
+    writeToken("file", token, env);
+    const t0 = Date.now();
+    const r = spawnSync(process.execPath, [cli, "hook", "session-start"], {
+      env: { ...env, AGENTTASK_HOOK_LIMIT_MS: "1500", AGENTTASK_PROJECT: "qa" } as NodeJS.ProcessEnv,
+      input: "{}",
+      encoding: "utf8",
+      timeout: 9000,
+    });
+    silent.close();
+    expect(r.status).toBe(0);
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(r.stdout.trim().split("\n")).toHaveLength(1);
   });
 
   it("AC-18: work refuses plain http beyond loopback and bad inbox ids", async () => {
@@ -261,15 +310,15 @@ describe("AC-18: scheduled work", () => {
     online();
     mkdirSync(stateDir(env), { recursive: true });
     const lockFile = join(stateDir(env), "work-wk.lock");
-    for (const holder of [String(process.pid), ""]) {
+    for (const holder of ["1", ""]) {
       writeFileSync(lockFile, holder); // live pid, or a lock whose pid is not written yet
       const c = capture();
-      expect(await runWork(["--inbox", "wk", "--dir", home], c.out, env)).toBe(0);
+      expect(await runWork(["--inbox", "wk", "--dir", workDir], c.out, env)).toBe(0);
       expect(c.text()).toContain("another run");
     }
     writeFileSync(lockFile, "999999999");
     const c = capture();
-    await runWork(["--inbox", "wk", "--dir", home], c.out, env);
+    await runWork(["--inbox", "wk", "--dir", workDir], c.out, env);
     expect(c.text()).not.toContain("another run");
     expect(existsSync(lockFile)).toBe(false);
   });
@@ -308,7 +357,7 @@ describe("AC-18: scheduled work", () => {
     chmodSync(join(fakeBin, "systemctl"), 0o755);
     const e = { ...env, AGENTTASK_TOKEN: token, AGENTTASK_PLATFORM: "linux" };
     const c = capture();
-    expect(await runInit(["--url", base, "--work", "wk", "--every", "15", "--work-dir", home, "--yes"], c.out, e)).toBe(0);
+    expect(await runInit(["--url", base, "--work", "wk", "--every", "15", "--work-dir", workDir, "--yes"], c.out, e)).toBe(0);
     const timer = join(home, "config", "systemd", "user", "agenttaskservice-work-wk.timer");
     expect(readFileSync(timer, "utf8")).toContain("OnUnitActiveSec=15min");
     const service = readFileSync(timer.replace(/\.timer$/, ".service"), "utf8");

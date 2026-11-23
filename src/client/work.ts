@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: MIT
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve, sep } from "node:path";
+
+const homeDir = (env: Record<string, string | undefined>) => env.HOME || homedir();
 import { parseArgs } from "node:util";
 import { PROJECT_ID } from "../store.js";
 import { callTool, takeMarker, type Conn } from "./api.js";
 import { expandHome, stateDir } from "./config.js";
 import { connect } from "./conn.js";
-import { selfArgv, shellQuote } from "./init.js";
+import { claudeDir, selfArgv, shellQuote } from "./init.js";
 
 type Out = (s: string) => void;
 type Env = Record<string, string | undefined>;
@@ -27,12 +30,21 @@ export const WORK_MCP_TOOLS = ["list_my_tasks", "get_task", "claim_task", "add_n
  * only the listed built-in tools exist, file tools are approved only inside the work folder,
  * no user-level settings (and their allow rules) are loaded, and the only MCP server is this one.
  */
-export function claudeArgs(prompt: string, self: string[], url: string, restricted: boolean): string[] {
+/**
+ * Never writable by the headless run, whatever the folder: files that make Claude Code or git
+ * run commands later (settings with hooks, MCP config, git hooks and config).
+ */
+export const WORK_DENY_PATHS = ["./.claude/**", "./**/.claude/**", "./**/settings*.json", "./.mcp.json", "./**/.mcp.json", "./.git/**", "./**/.git/**", "./.gitmodules"];
+
+export function claudeArgs(prompt: string, self: string[], url: string, opts: { restricted: boolean; promptsFlag: boolean }): string[] {
   const mcp = { mcpServers: { agenttaskservice: { type: "http", url: `${url}/mcp`, headersHelper: `${self.map(shellQuote).join(" ")} auth-header` } } };
   return [
     "-p",
     prompt,
-    ...(restricted ? ["--restricted"] : []),
+    ...(opts.restricted ? ["--restricted"] : []),
+    ...(opts.promptsFlag ? ["--permission-prompts", "none"] : []),
+    "--settings",
+    JSON.stringify({ disableAllHooks: true }),
     "--tools",
     WORK_BUILTIN_TOOLS.join(","),
     "--setting-sources",
@@ -45,14 +57,33 @@ export function claudeArgs(prompt: string, self: string[], url: string, restrict
     "--allowedTools",
     [...WORK_BUILTIN_TOOLS.map((t) => `${t}(./**)`), ...WORK_MCP_TOOLS].join(","),
     "--disallowedTools",
-    "Bash,WebFetch,WebSearch,Task,NotebookEdit,mcp__agenttaskservice__create_task",
+    [
+      "Bash",
+      "WebFetch",
+      "WebSearch",
+      "Task",
+      "NotebookEdit",
+      "mcp__agenttaskservice__create_task",
+      ...WORK_DENY_PATHS.flatMap((p) => [`Edit(${p})`, `Write(${p})`]),
+    ].join(","),
   ];
 }
 
-/** Newer Claude Code versions have --restricted, which also confines file tools to the working folder. */
-function supportsRestricted(env: Env): boolean {
+/** Newer Claude Code versions have --restricted (confines file tools, skips settings files) and --permission-prompts. */
+function claudeFeatures(env: Env): { restricted: boolean; promptsFlag: boolean } {
   const r = spawnSync("claude", ["--help"], { env: env as NodeJS.ProcessEnv, stdio: ["ignore", "pipe", "ignore"], timeout: 15_000 });
-  return String(r.stdout ?? "").includes("--restricted");
+  const help = String(r.stdout ?? "");
+  return { restricted: help.includes("--restricted"), promptsFlag: help.includes("--permission-prompts") };
+}
+
+/** Why `dir` must not be a work folder: it is, holds, or sits inside Claude Code's own config folder. */
+export function workDirProblem(dir: string, env: Env = process.env): string | undefined {
+  const d = resolve(dir);
+  const c = resolve(claudeDir(env));
+  const inside = (a: string, b: string) => a === b || a.startsWith(b.endsWith(sep) ? b : b + sep);
+  if (inside(d, c) || inside(c, d)) return `the work folder must not be or contain Claude Code's config folder (${c})`;
+  if (d === resolve(homeDir(env))) return "the work folder must not be your home folder";
+  return undefined;
 }
 
 export function workPrompt(inbox: string, ids: string[], extra?: string): string {
@@ -131,8 +162,13 @@ export async function runWork(argv: string[], out: Out = console.log, env: Env =
     }
     const extra = values["prompt-file"] ? readFileSync(expandHome(values["prompt-file"]), "utf8") : undefined;
     const prompt = workPrompt(inbox, todo, extra);
-    const args = claudeArgs(prompt, selfArgv(env), conn.url, supportsRestricted(env));
     const dir = expandHome(values.dir ?? process.cwd());
+    const bad = workDirProblem(dir, env);
+    if (bad) {
+      out(`error: ${bad}`);
+      return 1;
+    }
+    const args = claudeArgs(prompt, selfArgv(env), conn.url, claudeFeatures(env));
     out(`${stamp} work ${inbox}: ${todo.length} task(s): ${todo.join(", ")}${waiting ? `; ${waiting} waiting for the owner` : ""}.`);
     if (values["dry-run"]) {
       out(`would run in ${dir}: claude ${args.map((a) => JSON.stringify(a)).join(" ")}`);
