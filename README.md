@@ -39,7 +39,7 @@ Then set up each machine that runs Claude Code (see [Client setup](#client-setup
 
 ```sh
 npm install -g agenttaskservice
-agenttaskservice init --url https://tasks.example.com --token <token>
+AGENTTASK_TOKEN=<token> agenttaskservice init --url https://tasks.example.com
 ```
 
 Register the projects that receive tasks, so others can find them:
@@ -118,7 +118,9 @@ the token, lists what it will change, and asks before writing anything:
 - with `--rule`, adds a short task rule to `~/.claude/CLAUDE.md` (otherwise it prints it).
 
 Use `--dry-run` to only list the changes, `--yes` to skip the prompt. Running it
-again is safe: it changes only what differs.
+again is safe: it changes only what differs. Without a token in `AGENTTASK_TOKEN`
+it asks for one without echoing it. The client refuses plain `http://` to anything
+but loopback, since that sends the token in clear text; `--insecure` overrides this.
 
 At every session start the hook prints the project's open tasks and the tasks it
 sent that have finished, so Claude sees them before you type. It waits at most
@@ -134,10 +136,27 @@ sent that have finished, so Claude sees them before you type. It waits at most
 
 `agenttaskservice whoami` shows the result.
 
+**Inboxes this machine handles:** `init --watch <project>` (repeatable) makes the
+hook also list another project's open tasks on this machine, for example a shared
+inbox that only one machine processes.
+
+**Scheduled processing:** for an inbox no one opens Claude Code for, `init --work <project>`
+schedules `agenttaskservice work --inbox <project>`, every 60 minutes by default
+(`--every <minutes>`; `--every 0` removes the job). It uses launchd on macOS and a
+systemd user timer on Linux, and logs to `$XDG_STATE_HOME/agenttaskservice/work-<project>.log`.
+Each run lists the inbox first and starts Claude Code headless (`claude -p`) only when
+there is something to do, in `--work-dir` (default: the current folder), with tools limited
+to the agenttaskservice MCP tools and file reads and edits. Claude claims each task and either
+completes it, or, when the request is unclear or conflicts with what is there, adds a note
+starting `needs-owner:` and leaves it open; later runs skip it until someone replies.
+Put inbox-specific instructions in a file and pass it with `--work-prompt <file>`.
+Runs never overlap.
+
 **Offline:** when the server can't be reached, `agenttaskservice task create|note|complete|reject`
 queue the change in `$XDG_STATE_HOME/agenttaskservice/outbox.jsonl`. `agenttaskservice flush`
-or the next session start sends it. A change the server refuses on replay (for example,
-someone else finished the task first) is reported and dropped.
+or the next session start sends it. A change the server refuses on replay is reported
+and dropped. A queued complete, reject or claim given without `--version` is applied only
+if nobody else changed the task after it was queued.
 
 ## CLI
 
@@ -147,15 +166,17 @@ agenttaskservice token add <name> | token list | token revoke <name>
 agenttaskservice project add <id> [--name N] [--description D] [--alias A ...]
 agenttaskservice project list
 
-agenttaskservice init [--url U] [--token T] [--workspace-root D] [--rule] [--yes] [--dry-run]
+agenttaskservice init [--url U] [--workspace-root D] [--watch P]... [--rule] [--insecure] [--yes] [--dry-run]
+                      [--work P [--every MIN] [--work-dir D] [--work-prompt F]]
 agenttaskservice whoami | flush | auth-header | hook session-start
+agenttaskservice work --inbox P [--prompt-file F] [--dir D] [--dry-run]
 agenttaskservice task create --to P --title T [--body B|-] [--priority 1|2|3]
 agenttaskservice task list [--sent] | show <id> | claim <id> | note <id> <text>
 agenttaskservice task complete <id> --result R | reject <id> --reason R
 ```
 
 Task commands accept `--project P`. Without `--version`, complete, reject and claim
-act on the task as it is when the command is sent.
+act on the task as it is when the command is sent (if queued, see Offline above).
 
 | Client env var | Purpose |
 | --- | --- |
@@ -165,6 +186,7 @@ act on the task as it is when the command is sent.
 | `AGENTTASK_WORKSPACE_ROOT` | Workspace root (overrides `client.toml`) |
 | `AGENTTASK_TOKEN_STORE` | `keychain`, `secret-tool` or `file` |
 | `AGENTTASK_CLIENT_CONFIG` | Path to `client.toml` |
+| `AGENTTASK_ALLOW_INSECURE_HTTP` | `1` allows plain http to a non-loopback server |
 
 ## Development
 

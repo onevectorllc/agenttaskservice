@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: MIT
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
+import { platform } from "node:os";
+import { PROJECT_ID } from "../store.js";
+import { scheduleSteps } from "./schedule.js";
 import { createInterface } from "node:readline/promises";
+import { Writable } from "node:stream";
 import { parseArgs } from "node:util";
 import { callTool, getJson, Refused } from "./api.js";
-import { clientConfigPath, expandHome, loadClientConfig, saveClientConfig, type ClientConfig } from "./config.js";
+import { clientConfigPath, expandHome, loadClientConfig, saveClientConfig, urlProblem, type ClientConfig } from "./config.js";
 import { defaultTokenStore, readToken, writeToken } from "./token.js";
 
 type Out = (s: string) => void;
@@ -30,12 +34,20 @@ export function claudeDir(env: Env = process.env): string {
   return env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
 }
 
-/** How Claude Code should run this CLI: the bare name when it is on PATH, otherwise node + this file. */
-export function selfCommand(env: Env = process.env): string {
+/** How to run this CLI later: the bare name when it is on PATH, otherwise node + this file. */
+export function selfArgv(env: Env = process.env): string[] {
   const onPath = spawnSync("sh", ["-c", "command -v agenttaskservice"], { stdio: "ignore", env: env as NodeJS.ProcessEnv }).status === 0;
-  if (onPath) return "agenttaskservice";
-  const script = realpathSync(process.argv[1] ?? "");
-  return `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`;
+  if (onPath) return ["agenttaskservice"];
+  return [process.execPath, realpathSync(process.argv[1] ?? "")];
+}
+
+/** POSIX shell quoting: only quote what needs it, with single quotes. */
+export function shellQuote(a: string): string {
+  return /^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`;
+}
+
+export function selfCommand(env: Env = process.env): string {
+  return selfArgv(env).map(shellQuote).join(" ");
 }
 
 interface HookEntry {
@@ -48,7 +60,7 @@ export function mergeHook(settings: Record<string, any>, command: string): { set
   const next = structuredClone(settings);
   next.hooks ??= {};
   const list: HookEntry[] = Array.isArray(next.hooks.SessionStart) ? next.hooks.SessionStart : [];
-  const ours = (h: { command?: string }) => /agenttaskservice\b.*hook session-start|hook session-start.*agenttaskservice/.test(h.command ?? "");
+  const ours = (h: { command?: string }) => /\bhook session-start$/.test(h.command ?? "") && /agenttaskservice|cli\.js/.test(h.command ?? "");
   const want = { type: "command", command: `${command} hook session-start`, timeout: 10 };
   const existing = list.find((e) => e.hooks?.some(ours));
   if (existing) {
@@ -75,7 +87,9 @@ export function mergeRule(text: string): { text: string; changed: boolean } {
   return { text: next, changed: next !== text };
 }
 
-function writeAtomic(file: string, body: string): void {
+/** Write via a temp file and rename. Follows a symlink (e.g. a dotfiles repo) instead of replacing it. */
+function writeAtomic(path: string, body: string): void {
+  const file = existsSync(path) ? realpathSync(path) : path;
   mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.agenttaskservice.tmp`;
   writeFileSync(tmp, body);
@@ -86,12 +100,16 @@ function hasClaude(env: Env): boolean {
   return spawnSync("sh", ["-c", "command -v claude"], { stdio: "ignore", env: env as NodeJS.ProcessEnv }).status === 0;
 }
 
-async function ask(question: string): Promise<string> {
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
+async function ask(question: string, hidden = false): Promise<string> {
+  process.stderr.write(question);
+  // When hidden, nothing typed is echoed: readline writes to a sink instead of the terminal.
+  const sink = new Writable({ write: (_c, _e, cb) => cb() });
+  const rl = createInterface({ input: process.stdin, output: hidden ? sink : process.stderr, terminal: hidden });
   try {
-    return (await rl.question(question)).trim();
+    return (await rl.question("")).trim();
   } finally {
     rl.close();
+    if (hidden) process.stderr.write("\n");
   }
 }
 
@@ -108,6 +126,12 @@ export async function runInit(argv: string[], out: Out = console.log, env: Env =
       url: { type: "string" },
       token: { type: "string" },
       "workspace-root": { type: "string" },
+      watch: { type: "string", multiple: true },
+      insecure: { type: "boolean" },
+      work: { type: "string" },
+      every: { type: "string" },
+      "work-dir": { type: "string" },
+      "work-prompt": { type: "string" },
       rule: { type: "boolean" },
       yes: { type: "boolean", short: "y" },
       "dry-run": { type: "boolean" },
@@ -123,16 +147,29 @@ export async function runInit(argv: string[], out: Out = console.log, env: Env =
     return 1;
   }
   url = url.replace(/\/+$/, "");
-  if (!/^https?:\/\//.test(url)) {
-    out("error: the URL must start with https:// (or http:// for a local server)");
+  const allowInsecureHttp = values.insecure ?? current.allowInsecureHttp;
+  const problem = urlProblem(url, allowInsecureHttp);
+  if (problem) {
+    out(`error: ${problem}`);
+    return 1;
+  }
+  for (const id of [...(values.watch ?? []), ...(values.work ? [values.work] : [])]) {
+    if (!PROJECT_ID.test(id)) {
+      out(`error: "${id}" is not a valid project id`);
+      return 1;
+    }
+  }
+  const every = values.every === undefined ? 60 : Number(values.every);
+  if (!Number.isFinite(every) || every < 0 || (every > 0 && every < 5) || every > 10_080) {
+    out("error: --every is minutes between runs: 0 to remove the job, otherwise 5 to 10080");
     return 1;
   }
 
   const store = env.AGENTTASK_TOKEN_STORE || existsSync(clientConfigPath(env)) ? current.tokenStore : defaultTokenStore();
   let token = values.token ?? env.AGENTTASK_TOKEN ?? readToken(store, env);
-  if (!token && interactive) token = await ask("Token (from `agenttaskservice token add <name>` on the server): ");
+  if (!token && interactive) token = await ask("Token (from `agenttaskservice token add <name>` on the server; not shown): ", true);
   if (!token) {
-    out("error: give the token with --token or AGENTTASK_TOKEN");
+    out("error: give the token in AGENTTASK_TOKEN (or --token, which your shell history keeps)");
     return 1;
   }
 
@@ -146,28 +183,43 @@ export async function runInit(argv: string[], out: Out = console.log, env: Env =
   }
   out(`Server ${url} is reachable and accepts the token.`);
 
+  const watch = [...new Set([...current.watch, ...(values.watch ?? []), ...(values.work && every > 0 ? [values.work] : [])])];
   const cfg: ClientConfig = {
     url,
     tokenStore: store,
     workspaceRoot: values["workspace-root"] ? expandHome(values["workspace-root"]) : current.workspaceRoot,
+    watch,
+    allowInsecureHttp,
   };
-  const self = selfCommand(env);
+  const argvSelf = selfArgv(env);
+  const self = argvSelf.map(shellQuote).join(" ");
+  if (argvSelf.some((a) => a.includes(`${sep}_npx${sep}`))) {
+    out("warning: running from the npx cache, which can be cleaned up later. Install it first: npm install -g agenttaskservice");
+  }
   const steps: Step[] = [];
 
   if (readToken(store, { ...env, AGENTTASK_TOKEN: undefined }) !== token) {
     steps.push({ what: `Store the token in ${store === "file" ? "a file readable only by you" : `the ${store} store`}`, apply: () => writeToken(store, token!, env) });
   }
-  steps.push({ what: `Write ${clientConfigPath(env)} (server URL${cfg.workspaceRoot ? ", workspace root" : ""}; no token)`, apply: () => void saveClientConfig(cfg, env) });
+  if (JSON.stringify(cfg) !== JSON.stringify({ ...current, url: current.url, tokenStore: store }) || !existsSync(clientConfigPath(env))) {
+    steps.push({ what: `Write ${clientConfigPath(env)} (server URL${cfg.workspaceRoot ? ", workspace root" : ""}${watch.length ? `, watched inboxes ${watch.join(", ")}` : ""}; no token)`, apply: () => void saveClientConfig(cfg, env) });
+  }
 
   const mcpJson = JSON.stringify({ type: "http", url: `${url}/mcp`, headersHelper: `${self} auth-header` });
   const mcpArgs = ["mcp", "add-json", MCP_NAME, mcpJson, "--scope", "user"];
   const claude = hasClaude(env);
-  if (claude) {
+  const run = (args: string[]) => spawnSync("claude", args, { env: env as NodeJS.ProcessEnv, stdio: ["ignore", "pipe", "pipe"] });
+  const registered = claude ? run(["mcp", "get", MCP_NAME]) : undefined;
+  const current_mcp = registered?.status === 0 ? `${registered.stdout}` : "";
+  if (claude && !(current_mcp.includes(`${url}/mcp`) && current_mcp.includes(`${self} auth-header`))) {
     steps.push({
-      what: `Register the MCP server "${MCP_NAME}" with Claude Code (user scope)`,
+      what: `${current_mcp ? "Update" : "Register"} the MCP server "${MCP_NAME}" with Claude Code (user scope)`,
       apply: () => {
-        spawnSync("claude", ["mcp", "remove", MCP_NAME, "--scope", "user"], { stdio: "ignore", env: env as NodeJS.ProcessEnv });
-        execFileSync("claude", mcpArgs, { stdio: ["ignore", "ignore", "pipe"], env: env as NodeJS.ProcessEnv });
+        // Add first; replace an existing entry only if the add was refused, so a failure never leaves none.
+        if (run(mcpArgs).status === 0) return;
+        run(["mcp", "remove", MCP_NAME, "--scope", "user"]);
+        const r = run(mcpArgs);
+        if (r.status !== 0) throw new Error(`claude mcp add-json failed: ${String(r.stderr).trim().split("\n")[0]}`);
       },
     });
   }
@@ -191,6 +243,28 @@ export async function runInit(argv: string[], out: Out = console.log, env: Env =
   if (values.rule) {
     const r = mergeRule(existsSync(ruleFile) ? readFileSync(ruleFile, "utf8") : "");
     if (r.changed) steps.push({ what: `Add the task rule to ${ruleFile}`, apply: () => writeAtomic(ruleFile, r.text) });
+  }
+
+  if (values.work) {
+    try {
+      steps.push(
+        ...scheduleSteps(
+          {
+            inbox: values.work,
+            every,
+            dir: resolve(expandHome(values["work-dir"] ?? process.cwd())),
+            promptFile: values["work-prompt"] ? resolve(expandHome(values["work-prompt"])) : undefined,
+            self: argvSelf,
+            path: env.PATH ?? "/usr/bin:/bin",
+          },
+          (env.AGENTTASK_PLATFORM as NodeJS.Platform) || platform(),
+          env,
+        ),
+      );
+    } catch (e) {
+      out(`error: ${(e as Error).message}`);
+      return 1;
+    }
   }
 
   out(values["dry-run"] ? "Would make these changes (dry run, nothing written):" : "Changes:");

@@ -64,7 +64,7 @@ describe("AC-10: client config", () => {
     const text = readFileSync(clientConfigPath(env), "utf8");
     expect(text).not.toContain("ats_");
     const cfg = loadClientConfig(env);
-    expect(cfg).toEqual({ url: "https://tasks.example.com", tokenStore: "file", workspaceRoot: "/srv/work" });
+    expect(cfg).toEqual({ url: "https://tasks.example.com", tokenStore: "file", workspaceRoot: "/srv/work", watch: [], allowInsecureHttp: false });
     expect(loadClientConfig({ ...env, AGENTTASK_URL: "http://other:1/" }).url).toBe("http://other:1");
   });
 });
@@ -261,7 +261,7 @@ describe("AC-15: init", () => {
     expect(existsSync(clientConfigPath(env))).toBe(false);
     expect(existsSync(tokenFile(env))).toBe(false);
     expect(existsSync(join(home, "claude", "settings.json"))).toBe(false);
-    expect(existsSync(claudeLog)).toBe(false);
+    expect(existsSync(claudeLog) ? readFileSync(claudeLog, "utf8") : "").not.toContain("add-json");
     expect(c.text()).not.toContain(token);
   });
 
