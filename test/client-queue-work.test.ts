@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: MIT
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { enqueue, flush, readQueue } from "../src/client/api.js";
+import { enqueue, flush, readQueue, takeMarker } from "../src/client/api.js";
 import { runClient, sessionStart } from "../src/client/commands.js";
 import { saveClientConfig, stateDir, urlProblem } from "../src/client/config.js";
 import { runInit, shellQuote } from "../src/client/init.js";
 import { launchdPlist, systemdUnits, type WorkJob } from "../src/client/schedule.js";
 import { writeToken } from "../src/client/token.js";
-import { NEEDS_OWNER, runWork, workPrompt } from "../src/client/work.js";
+import { claudeArgs, NEEDS_OWNER, runWork, waitsForOwner, workPrompt } from "../src/client/work.js";
 import { openDb } from "../src/db.js";
 import { startServer } from "../src/server.js";
 import { Store } from "../src/store.js";
@@ -192,8 +192,11 @@ describe("AC-18: scheduled work", () => {
     expect(c0.text()).toContain("nothing to do");
     expect(existsSync(claudeLog)).toBe(false);
 
+    // The real sequence a run follows: claim, needs-owner note, release.
     const waiting = store.createTask("client-b", { from_project: "qb", to_project: "wk", title: "Unclear" }).task;
+    store.claimTask("client-a", "wk", waiting.id, waiting.version);
     store.addNote("client-a", waiting.id, `${NEEDS_OWNER} which file?`);
+    store.releaseTask("client-a", "wk", waiting.id, store.getTask(waiting.id).task.version);
     const c1 = capture();
     expect(await runWork(["--inbox", "wk", "--dir", home], c1.out, env)).toBe(0);
     expect(c1.text()).toContain("1 waiting for the owner");
@@ -210,15 +213,71 @@ describe("AC-18: scheduled work", () => {
     expect(log).toContain("Check the rules folder for conflicts first.");
     expect(log).toContain("acceptEdits");
     expect(log).not.toContain(token);
+
+    // A reply from the sender after the needs-owner note puts the task back in the queue.
+    store.addNote("client-b", waiting.id, "the README");
+    rmSync(claudeLog);
+    await runWork(["--inbox", "wk", "--dir", home], capture().out, env);
+    expect(readFileSync(claudeLog, "utf8")).toContain(waiting.id);
   });
 
-  it("AC-18: a run is skipped while another holds the lock", async () => {
+  it("AC-18: the headless run is boxed in", () => {
+    const args = claudeArgs("do it", ["/opt/bin/agenttaskservice"], "https://tasks.example.com", true);
+    const opt = (k: string) => args[args.indexOf(k) + 1];
+    expect(args).toContain("--restricted");
+    expect(args).toContain("--strict-mcp-config");
+    expect(opt("--tools")).toBe("Read,Glob,Grep,Edit,Write");
+    expect(opt("--setting-sources")).toBe("project");
+    expect(opt("--allowedTools")).toContain("Read(./**)");
+    expect(opt("--allowedTools")).not.toMatch(/create_task|Bash/);
+    expect(opt("--disallowedTools")).toContain("mcp__agenttaskservice__create_task");
+    const mcp = JSON.parse(opt("--mcp-config"));
+    expect(mcp.mcpServers.agenttaskservice).toEqual({
+      type: "http",
+      url: "https://tasks.example.com/mcp",
+      headersHelper: "/opt/bin/agenttaskservice auth-header",
+    });
+    expect(claudeArgs("x", ["a"], "https://h", false)).not.toContain("--restricted");
+  });
+
+  it("AC-18: work refuses plain http beyond loopback and bad inbox ids", async () => {
+    saveClientConfig({ url: "http://tasks.example.com", tokenStore: "file" }, env);
+    writeToken("file", token, env);
+    const c = capture();
+    expect(await runWork(["--inbox", "wk"], c.out, env)).toBe(1);
+    expect(c.text()).toContain("plain http");
+    online();
+    expect(await runWork(["--inbox", "../../x"], capture().out, env)).toBe(1);
+  });
+
+  it("AC-18: only a needs-owner note as the latest real event means waiting", () => {
+    const ev = (kind: string, text = "") => ({ kind, text });
+    expect(waitsForOwner([ev("created"), ev("claimed"), ev("note", "needs-owner: x"), ev("released")])).toBe(true);
+    expect(waitsForOwner([ev("note", "needs-owner: x"), ev("note", "answer")])).toBe(false);
+    expect(waitsForOwner([ev("created")])).toBe(false);
+  });
+
+  it("AC-18: a run is skipped while another holds the lock; a dead holder's lock is taken over", async () => {
     online();
     mkdirSync(stateDir(env), { recursive: true });
-    writeFileSync(join(stateDir(env), "work-wk.lock"), String(process.pid));
+    const lockFile = join(stateDir(env), "work-wk.lock");
+    for (const holder of [String(process.pid), ""]) {
+      writeFileSync(lockFile, holder); // live pid, or a lock whose pid is not written yet
+      const c = capture();
+      expect(await runWork(["--inbox", "wk", "--dir", home], c.out, env)).toBe(0);
+      expect(c.text()).toContain("another run");
+    }
+    writeFileSync(lockFile, "999999999");
     const c = capture();
-    expect(await runWork(["--inbox", "wk"], c.out, env)).toBe(0);
-    expect(c.text()).toContain("another run");
+    await runWork(["--inbox", "wk", "--dir", home], c.out, env);
+    expect(c.text()).not.toContain("another run");
+    expect(existsSync(lockFile)).toBe(false);
+  });
+
+  it("AC-18: takeMarker never takes a live holder's file", () => {
+    const f = join(home, "m");
+    expect(takeMarker(f, 1000)).toBe(true);
+    expect(takeMarker(f, 1000)).toBe(false);
   });
 
   it("AC-18: the prompt names the tasks and the needs-owner rule", () => {
@@ -233,9 +292,15 @@ describe("AC-18: scheduled work", () => {
     expect(plist).toContain("<integer>3600</integer>");
     expect(plist).toContain("<string>--inbox</string>\n    <string>wk</string>");
     expect(plist).toContain("<string>/usr/bin:/bin</string>");
-    const u = systemdUnits({ ...job, every: 30 });
+    const withEnv = { ...job, env: { XDG_STATE_HOME: "/srv/state", AGENTTASK_TOKEN: "ats_leak" } };
+    expect(launchdPlist(withEnv, env)).toContain("<key>XDG_STATE_HOME</key>\n    <string>/srv/state</string>");
+    expect(launchdPlist(withEnv, env)).not.toContain("ats_leak");
+    const u = systemdUnits({ ...withEnv, every: 30 }, env);
     expect(u.timer).toContain("OnUnitActiveSec=30min");
     expect(u.service).toContain('ExecStart="agenttaskservice" "work" "--inbox" "wk"');
+    expect(u.service).toContain('Environment="XDG_STATE_HOME=/srv/state"');
+    expect(u.service).toMatch(/StandardOutput=append:.*work-wk\.log/);
+    expect(u.service).not.toContain("ats_leak");
   });
 
   it("AC-18: init --work installs the timer, --every 0 removes it", async () => {
@@ -246,6 +311,9 @@ describe("AC-18: scheduled work", () => {
     expect(await runInit(["--url", base, "--work", "wk", "--every", "15", "--work-dir", home, "--yes"], c.out, e)).toBe(0);
     const timer = join(home, "config", "systemd", "user", "agenttaskservice-work-wk.timer");
     expect(readFileSync(timer, "utf8")).toContain("OnUnitActiveSec=15min");
+    const service = readFileSync(timer.replace(/\.timer$/, ".service"), "utf8");
+    expect(service).toMatch(/ExecStart="\//); // absolute program path
+    expect(service).toContain(`XDG_STATE_HOME=${join(home, "state")}`);
     expect(readFileSync(join(home, "systemctl.log"), "utf8")).toContain("enable --now agenttaskservice-work-wk.timer");
     expect(readFileSync(join(home, "config", "agenttaskservice", "client.toml"), "utf8")).toContain("wk");
 

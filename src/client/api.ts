@@ -3,7 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { stateDir } from "./config.js";
 
@@ -116,7 +116,9 @@ function withQueueLock<T>(env: Env, fn: () => T): T {
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
       // A lock older than 30 s belongs to a crashed process.
-      if (Date.now() - statSync(file, { throwIfNoEntry: false })!.mtimeMs > 30_000) rmSync(file, { force: true });
+      const st = statSync(file, { throwIfNoEntry: false });
+      if (!st) continue; // released between our open and stat: try again now
+      if (Date.now() - st.mtimeMs > 30_000) rmSync(file, { force: true });
       else if (Date.now() > until) throw new Error(`queue is locked (${file})`);
       else Atomics.wait(sleeper, 0, 0, 20);
     }
@@ -188,6 +190,44 @@ export async function withVersion(
   return { ...rest, version: task.version };
 }
 
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Create `file` holding our pid. If it exists, it is taken over only when its holder is gone:
+ * the pid no longer runs, or (empty file, or another machine's pid) it has not been touched for `staleMs`.
+ */
+export function takeMarker(file: string, staleMs: number): boolean {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const fd = openSync(file, "wx", 0o600);
+      writeSync(fd, String(process.pid));
+      closeSync(fd);
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      const st = statSync(file, { throwIfNoEntry: false });
+      if (!st) continue;
+      const pid = Number(readFileSync(file, "utf8").trim());
+      const fresh = Date.now() - st.mtimeMs < staleMs;
+      if (pid > 0 ? pidAlive(pid) && pid !== process.pid : fresh) return false;
+      if (pid === process.pid && fresh) return false;
+      rmSync(file, { force: true });
+    }
+  }
+  return false;
+}
+
+function takeFlushMarker(file: string): boolean {
+  return takeMarker(file, 120_000);
+}
+
 export interface FlushResult {
   sent: Queued[];
   dropped: { item: Queued; reason: string }[];
@@ -203,16 +243,9 @@ export async function flush(conn: Conn, env: Env = process.env, opts: { deadline
   const result: FlushResult = { sent: [], dropped: [], remaining: 0 };
   mkdirSync(stateDir(env), { recursive: true });
   const running = `${outboxPath(env)}.flushing`;
-  try {
-    closeSync(openSync(running, "wx", 0o600));
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    if (Date.now() - statSync(running, { throwIfNoEntry: false })!.mtimeMs < 120_000) {
-      result.remaining = readQueue(env).length;
-      return result; // another flush is running
-    }
-    rmSync(running, { force: true });
-    closeSync(openSync(running, "wx", 0o600));
+  if (!takeFlushMarker(running)) {
+    result.remaining = readQueue(env).length;
+    return result; // another flush is running
   }
   try {
     const own = new Map<string, number>();
@@ -227,6 +260,7 @@ export async function flush(conn: Conn, env: Env = process.env, opts: { deadline
         result.dropped.push({ item, reason: e.message });
       }
       removeFromQueue(item.id, env);
+      utimesSync(running, new Date(), new Date()); // still alive: keeps the marker fresh
     }
   } finally {
     rmSync(running, { force: true });

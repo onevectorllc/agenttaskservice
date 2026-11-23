@@ -30,14 +30,22 @@ export const TASK_RULE = `${RULE_START}
 - Never put secrets in a task.
 ${RULE_END}`;
 
+/** Non-secret settings the scheduled job needs to find the same config, token store and state as this shell. */
+export function jobEnv(env: Env): Record<string, string> {
+  const keep = ["XDG_CONFIG_HOME", "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR", "AGENTTASK_CLIENT_CONFIG", "AGENTTASK_TOKEN_STORE"];
+  return Object.fromEntries(keep.filter((k) => env[k]).map((k) => [k, env[k]!]));
+}
+
 export function claudeDir(env: Env = process.env): string {
   return env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
 }
 
 /** How to run this CLI later: the bare name when it is on PATH, otherwise node + this file. */
 export function selfArgv(env: Env = process.env): string[] {
-  const onPath = spawnSync("sh", ["-c", "command -v agenttaskservice"], { stdio: "ignore", env: env as NodeJS.ProcessEnv }).status === 0;
-  if (onPath) return ["agenttaskservice"];
+  // Absolute path: launchd and systemd don't search the job's PATH for the program itself.
+  const r = spawnSync("sh", ["-c", "command -v agenttaskservice"], { stdio: ["ignore", "pipe", "ignore"], env: env as NodeJS.ProcessEnv });
+  const found = r.status === 0 ? String(r.stdout).trim() : "";
+  if (found.startsWith("/")) return [found];
   return [process.execPath, realpathSync(process.argv[1] ?? "")];
 }
 
@@ -256,6 +264,7 @@ export async function runInit(argv: string[], out: Out = console.log, env: Env =
             promptFile: values["work-prompt"] ? resolve(expandHome(values["work-prompt"])) : undefined,
             self: argvSelf,
             path: env.PATH ?? "/usr/bin:/bin",
+            env: jobEnv(env),
           },
           (env.AGENTTASK_PLATFORM as NodeJS.Platform) || platform(),
           env,

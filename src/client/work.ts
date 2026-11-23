@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { callTool, type Conn } from "./api.js";
-import { expandHome, loadClientConfig, stateDir } from "./config.js";
-import { readToken } from "./token.js";
+import { PROJECT_ID } from "../store.js";
+import { callTool, takeMarker, type Conn } from "./api.js";
+import { expandHome, stateDir } from "./config.js";
+import { connect } from "./conn.js";
+import { selfArgv, shellQuote } from "./init.js";
 
 type Out = (s: string) => void;
 type Env = Record<string, string | undefined>;
@@ -13,8 +15,45 @@ type Env = Record<string, string | undefined>;
 /** A note starting with this marks a task that waits for a person; scheduled runs skip it. */
 export const NEEDS_OWNER = "needs-owner:";
 
-/** Tools the headless session may use without asking. */
-export const WORK_TOOLS = ["mcp__agenttaskservice", "Read", "Glob", "Grep", "Edit", "Write"];
+/** Built-in tools the headless session gets at all. No shell, no web, no subagents. */
+export const WORK_BUILTIN_TOOLS = ["Read", "Glob", "Grep", "Edit", "Write"];
+/** Task tools it may call: not create_task, so a request can't fan out into new tasks. */
+export const WORK_MCP_TOOLS = ["list_my_tasks", "get_task", "claim_task", "add_note", "release_task", "complete_task", "reject_task"].map(
+  (t) => `mcp__agenttaskservice__${t}`,
+);
+
+/**
+ * Arguments for the headless run. Task text comes from other machines, so the session is boxed in:
+ * only the listed built-in tools exist, file tools are approved only inside the work folder,
+ * no user-level settings (and their allow rules) are loaded, and the only MCP server is this one.
+ */
+export function claudeArgs(prompt: string, self: string[], url: string, restricted: boolean): string[] {
+  const mcp = { mcpServers: { agenttaskservice: { type: "http", url: `${url}/mcp`, headersHelper: `${self.map(shellQuote).join(" ")} auth-header` } } };
+  return [
+    "-p",
+    prompt,
+    ...(restricted ? ["--restricted"] : []),
+    "--tools",
+    WORK_BUILTIN_TOOLS.join(","),
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--mcp-config",
+    JSON.stringify(mcp),
+    "--permission-mode",
+    "acceptEdits",
+    "--allowedTools",
+    [...WORK_BUILTIN_TOOLS.map((t) => `${t}(./**)`), ...WORK_MCP_TOOLS].join(","),
+    "--disallowedTools",
+    "Bash,WebFetch,WebSearch,Task,NotebookEdit,mcp__agenttaskservice__create_task",
+  ];
+}
+
+/** Newer Claude Code versions have --restricted, which also confines file tools to the working folder. */
+function supportsRestricted(env: Env): boolean {
+  const r = spawnSync("claude", ["--help"], { env: env as NodeJS.ProcessEnv, stdio: ["ignore", "pipe", "ignore"], timeout: 15_000 });
+  return String(r.stdout ?? "").includes("--restricted");
+}
 
 export function workPrompt(inbox: string, ids: string[], extra?: string): string {
   return [
@@ -29,39 +68,19 @@ export function workPrompt(inbox: string, ids: string[], extra?: string): string
   ].join("\n");
 }
 
-function waitsForOwner(events: { kind: string; text?: string | null }[]): boolean {
-  const last = events.at(-1);
+/** True when the latest event, ignoring claims and releases, is a needs-owner note. A later note (a reply) clears it. */
+export function waitsForOwner(events: { kind: string; text?: string | null }[]): boolean {
+  const last = events.filter((e) => e.kind !== "claimed" && e.kind !== "released").at(-1);
   return last?.kind === "note" && String(last.text ?? "").trimStart().toLowerCase().startsWith(NEEDS_OWNER);
-}
-
-function alive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "EPERM";
-  }
 }
 
 /** One run at a time per inbox. Returns a release function, or undefined when another run holds the lock. */
 function lock(inbox: string, env: Env): (() => void) | undefined {
-  const dir = stateDir(env);
-  mkdirSync(dir, { recursive: true });
-  const file = resolve(dir, `work-${inbox}.lock`);
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const fd = openSync(file, "wx", 0o600);
-      writeSync(fd, String(process.pid));
-      closeSync(fd);
-      return () => rmSync(file, { force: true });
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      const pid = Number(readFileSync(file, "utf8").trim());
-      if (pid && alive(pid)) return undefined;
-      rmSync(file, { force: true }); // stale lock from a crashed run
-    }
-  }
-  return undefined;
+  mkdirSync(stateDir(env), { recursive: true });
+  const file = join(stateDir(env), `work-${inbox}.lock`);
+  // A run is capped at 30 min; a lock untouched for longer than that is stale.
+  if (!takeMarker(file, 35 * 60_000)) return undefined;
+  return () => rmSync(file, { force: true });
 }
 
 export async function runWork(argv: string[], out: Out = console.log, env: Env = process.env): Promise<number> {
@@ -76,17 +95,21 @@ export async function runWork(argv: string[], out: Out = console.log, env: Env =
     },
   });
   const inbox = values.inbox;
-  if (!inbox) {
+  if (!inbox || !PROJECT_ID.test(inbox)) {
     out("error: work needs --inbox <project id>");
     return 1;
   }
-  const cfg = loadClientConfig(env);
-  const token = readToken(cfg.tokenStore, env);
-  if (!cfg.url || !token) {
+  let conn: Conn | undefined;
+  try {
+    conn = connect(env, 15_000);
+  } catch (e) {
+    out(`error: ${(e as Error).message}`);
+    return 1;
+  }
+  if (!conn) {
     out("error: not set up (run `agenttaskservice init`)");
     return 1;
   }
-  const conn: Conn = { url: cfg.url, token, timeoutMs: 15_000 };
   const release = lock(inbox, env);
   if (!release) {
     out(`work ${inbox}: another run is still going; skipping.`);
@@ -108,7 +131,7 @@ export async function runWork(argv: string[], out: Out = console.log, env: Env =
     }
     const extra = values["prompt-file"] ? readFileSync(expandHome(values["prompt-file"]), "utf8") : undefined;
     const prompt = workPrompt(inbox, todo, extra);
-    const args = ["-p", prompt, "--permission-mode", "acceptEdits", "--allowedTools", WORK_TOOLS.join(" ")];
+    const args = claudeArgs(prompt, selfArgv(env), conn.url, supportsRestricted(env));
     const dir = expandHome(values.dir ?? process.cwd());
     out(`${stamp} work ${inbox}: ${todo.length} task(s): ${todo.join(", ")}${waiting ? `; ${waiting} waiting for the owner` : ""}.`);
     if (values["dry-run"]) {

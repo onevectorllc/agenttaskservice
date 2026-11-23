@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { callTool, enqueue, flush, getJson, readQueue, Refused, Unreachable, withVersion, type Conn } from "./api.js";
-import { loadClientConfig, urlProblem } from "./config.js";
+import { loadClientConfig } from "./config.js";
+import { connect } from "./conn.js";
 import { detectProject } from "./project.js";
 import { readToken } from "./token.js";
 import { runWork } from "./work.js";
@@ -28,16 +29,7 @@ export const CLIENT_USAGE = `Client commands:
   (all task commands accept --project P; otherwise it is detected from the folder)
 `;
 
-/** Server connection, or undefined when this machine is not set up. Throws if the URL is unsafe for the token. */
-function conn(env: Env, timeoutMs?: number): Conn | undefined {
-  const cfg = loadClientConfig(env);
-  if (!cfg.url) return undefined;
-  const problem = urlProblem(cfg.url, cfg.allowInsecureHttp);
-  if (problem) throw new Error(problem);
-  const token = readToken(cfg.tokenStore, env);
-  if (!token) return undefined;
-  return { url: cfg.url, token, timeoutMs };
-}
+const conn = (env: Env, timeoutMs?: number) => connect(env, timeoutMs);
 
 const firstLine = (e: unknown) => (e instanceof Error ? e.message : String(e)).split("\n")[0].slice(0, 200);
 
@@ -55,6 +47,8 @@ function line(t: any): string {
 
 /** The hook's whole time budget. Claude Code's own limit for it (set by init) is 10 s. */
 export const HOOK_BUDGET_MS = 4000;
+/** Past this the hook prints one line and returns, even mid-request. */
+export const HOOK_HARD_LIMIT_MS = 7000;
 
 /** Text for the session's context. A hook must not break or stall a session. */
 export async function sessionStart(cwd: string, env: Env = process.env): Promise<string> {
@@ -182,7 +176,13 @@ export async function runClient(argv: string[], out: Out = console.log, env: Env
 
   if (cmd === "hook" && sub === "session-start") {
     try {
-      out(await sessionStart(await hookCwd(env), env));
+      // Hard stop well inside Claude Code's 10 s hook limit, whatever the network does.
+      let timer: NodeJS.Timeout | undefined;
+      const limit = new Promise<string>((resolve) => {
+        timer = setTimeout(() => resolve("agenttaskservice: the server was too slow; tasks not checked."), HOOK_HARD_LIMIT_MS);
+      });
+      out(await Promise.race([hookCwd(env).then((cwd) => sessionStart(cwd, env)), limit]));
+      clearTimeout(timer);
     } catch (e) {
       out(`agenttaskservice: hook failed (${firstLine(e)}); tasks not checked.`);
     }

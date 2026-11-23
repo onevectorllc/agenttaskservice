@@ -18,6 +18,8 @@ export interface WorkJob {
   self: string[];
   /** PATH for the job, so it finds `claude` and `node` (launchd and systemd start with a bare PATH). */
   path: string;
+  /** Extra environment (non-secret: config and state locations). Never the token. */
+  env?: Record<string, string>;
 }
 
 export interface ScheduleStep {
@@ -58,8 +60,10 @@ ${args}
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key>
-    <string>${xml(job.path)}</string>
+${Object.entries({ PATH: job.path, ...job.env })
+  .filter(([k]) => k !== "AGENTTASK_TOKEN")
+  .map(([k, v]) => `    <key>${xml(k)}</key>\n    <string>${xml(v)}</string>`)
+  .join("\n")}
   </dict>
   <key>StartInterval</key>
   <integer>${Math.round(job.every * 60)}</integer>
@@ -76,15 +80,22 @@ ${args}
 `;
 }
 
-export function systemdUnits(job: WorkJob): { service: string; timer: string } {
+export function systemdUnits(job: WorkJob, env: Env = process.env): { service: string; timer: string } {
+  const log = join(stateDir(env), `work-${job.inbox}.log`);
+  const vars = Object.entries({ PATH: job.path, ...job.env })
+    .filter(([k]) => k !== "AGENTTASK_TOKEN")
+    .map(([k, v]) => `Environment=${sd(`${k}=${v}`)}`)
+    .join("\n");
   return {
     service: `[Unit]
 Description=agenttaskservice: handle the ${job.inbox} inbox
 
 [Service]
 Type=oneshot
-Environment=${sd(`PATH=${job.path}`)}
+${vars}
 ExecStart=${workArgv(job).map(sd).join(" ")}
+StandardOutput=append:${log}
+StandardError=append:${log}
 `,
     timer: `[Unit]
 Description=agenttaskservice: handle the ${job.inbox} inbox every ${job.every} min
@@ -162,8 +173,9 @@ export function scheduleSteps(job: WorkJob, platform: NodeJS.Platform, env: Env 
       {
         what: `Schedule \`work --inbox ${job.inbox}\` every ${job.every} min with a systemd user timer (${dir}/${name}.timer)`,
         apply: () => {
-          const u = systemdUnits(job);
+          const u = systemdUnits(job, env);
           mkdirSync(dir, { recursive: true });
+          mkdirSync(stateDir(env), { recursive: true });
           writeFileSync(join(dir, `${name}.service`), u.service);
           writeFileSync(join(dir, `${name}.timer`), u.timer);
           run("systemctl", ["--user", "daemon-reload"], env);

@@ -145,8 +145,11 @@ schedules `agenttaskservice work --inbox <project>`, every 60 minutes by default
 (`--every <minutes>`; `--every 0` removes the job). It uses launchd on macOS and a
 systemd user timer on Linux, and logs to `$XDG_STATE_HOME/agenttaskservice/work-<project>.log`.
 Each run lists the inbox first and starts Claude Code headless (`claude -p`) only when
-there is something to do, in `--work-dir` (default: the current folder), with tools limited
-to the agenttaskservice MCP tools and file reads and edits. Claude claims each task and either
+there is something to do, in `--work-dir` (default: the current folder). Task text comes
+from other machines, so that session is boxed in: only file read and edit tools exist (no
+shell, web or subagents), they are approved only inside the work folder, your user-level
+Claude Code settings are not loaded, the only MCP server is this one, and it cannot create
+new tasks. Claude Code versions with `--restricted` get that mode too. Claude claims each task and either
 completes it, or, when the request is unclear or conflicts with what is there, adds a note
 starting `needs-owner:` and leaves it open; later runs skip it until someone replies.
 Put inbox-specific instructions in a file and pass it with `--work-prompt <file>`.
