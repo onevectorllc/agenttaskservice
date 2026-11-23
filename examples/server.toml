@@ -1,0 +1,16 @@
+# agenttaskservice server settings. Every value is optional.
+
+[server]
+host = "127.0.0.1"   # keep loopback behind a reverse proxy; a LAN address for standalone
+port = 7420
+
+[tls]
+# Set both to serve HTTPS directly (standalone mode).
+# cert = "/etc/agenttaskservice/cert.pem"
+# key  = "/etc/agenttaskservice/key.pem"
+
+[storage]
+# data_dir = "~/.local/share/agenttaskservice"
+
+[tasks]
+lease_hours = 4

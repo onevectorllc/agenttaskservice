@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd agent for macOS. Install a pinned version (npm install -g agenttaskservice@<version>),
+     replace __BIN__ with the output of `command -v agenttaskservice`,
+     copy to ~/Library/LaunchAgents/, then: launchctl load ~/Library/LaunchAgents/com.example.agenttaskservice.plist -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.agenttaskservice</string>
+  <key>ProgramArguments</key>
+  <array><string>__BIN__</string><string>serve</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
