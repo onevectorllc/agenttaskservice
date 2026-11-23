@@ -122,10 +122,10 @@ export function createMcpServer(store: Store, actor: string): McpServer {
   server.registerTool(
     "reject_task",
     {
-      description: "Receiver: hand a task back with a reason (wrong project, won't do). Sender: cancel your own task.",
-      inputSchema: { project, task_id: taskId, version, reason: z.string().min(1).max(20000) },
+      description: "Receiver: hand a task back with a reason (wrong project, won't do); while it is claimed, only the claim holder can. Sender: cancel your own task, even if it is claimed.",
+      inputSchema: { project, task_id: taskId, version, reason: z.string().min(1).max(20000), session },
     },
-    wrap((a) => ({ task: store.rejectTask(actor, a.project, a.task_id, a.reason, a.version) })),
+    wrap((a) => ({ task: store.rejectTask(actor, a.project, a.task_id, a.reason, a.version, a.session) })),
   );
 
   server.registerTool(

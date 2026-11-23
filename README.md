@@ -27,7 +27,8 @@ npx agenttaskservice serve
 
 The first start creates an `admin` token and saves it to `admin-token` in the
 data directory, readable only by you (it is never printed, so it can't end up in
-service logs). Copy it somewhere safe and delete the file.
+service logs). Copy it somewhere safe and delete the file. If every token is later revoked,
+the next start creates a new admin token the same way.
 Create one token per machine or client:
 
 ```sh
@@ -66,7 +67,8 @@ Each tool takes `project`, the caller's project id (lowercase letters, digits,
 `.`, `_`, `-`). Claim, release, complete and reject require `version` from the
 task you last read, so nobody's change is overwritten. While a claim is live,
 only its holder (the same token, and the same `session` label if one was used)
-can complete or release the task, and only the holder's notes renew the lease.
+can complete, release or reject the task, and only the holder's notes renew the
+lease. The sending project can always cancel its own task.
 
 ## HTTP endpoints
 

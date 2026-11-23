@@ -139,6 +139,16 @@ describe("AC-2/AC-3: versions and claim holders", () => {
     expect(store.completeTask("mini", "project-b", t.id, v(t.id), "done", "s1").claimed_by).toBe("mini/s1");
   });
 
+  it("AC-2: only the claim holder can reject; the sender can still cancel", () => {
+    const t = create();
+    store.claimTask("mini", "project-b", t.id, v(t.id), "s1");
+    expectError(() => store.rejectTask("laptop", "project-b", t.id, "nope", v(t.id)), "conflict");
+    expect(store.rejectTask("mini", "project-b", t.id, "wrong project", v(t.id), "s1").status).toBe("rejected");
+    const u = create();
+    store.claimTask("mini", "project-b", u.id, v(u.id));
+    expect(store.rejectTask("laptop", "project-a", u.id, "no longer needed", v(u.id)).status).toBe("cancelled");
+  });
+
   it("AC-2: a note from someone else is recorded but does not renew the lease", () => {
     const t = create();
     store.claimTask("mini", "project-b", t.id, v(t.id));

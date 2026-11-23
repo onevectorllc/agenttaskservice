@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
-import { chmodSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, openSync, realpathSync, writeSync } from "node:fs";
+import type { Server } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -23,7 +24,12 @@ Options:
   --config <path>               Config file (default: $XDG_CONFIG_HOME/agenttaskservice/server.toml)
 `;
 
-export function run(argv: string[], out: (s: string) => void = console.log): number {
+export interface RunHooks {
+  /** Called with the listening server after `serve` starts (used by tests). */
+  onServer?: (server: Server) => void;
+}
+
+export function run(argv: string[], out: (s: string) => void = console.log, hooks: RunHooks = {}): number {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
@@ -49,15 +55,21 @@ export function run(argv: string[], out: (s: string) => void = console.log): num
       if (store.countActiveTokens() === 0) {
         // Never print the token: service managers keep stdout in their logs.
         const file = join(cfg.dataDir, "admin-token");
-        writeFileSync(file, `${store.addToken("admin")}\n`, { mode: 0o600 });
-        chmodSync(file, 0o600);
+        // "wx": never follow or overwrite an existing file or symlink.
+        const fd = openSync(file, "wx", 0o600);
+        try {
+          writeSync(fd, `${store.addToken("admin")}\n`);
+        } finally {
+          closeSync(fd);
+        }
         out(`No tokens yet. Created the 'admin' token and saved it to ${file} (readable only by you).`);
         out("Copy it somewhere safe, then delete that file.");
       }
       if (!isLoopback(cfg.host) && !cfg.tlsCert) {
         console.warn(`warning: listening on ${cfg.host} without TLS. Use a TLS reverse proxy or set tls.cert and tls.key.`);
       }
-      startServer(store, cfg);
+      const server = startServer(store, cfg);
+      hooks.onServer?.(server);
       out(`agenttaskservice listening on ${cfg.tlsCert ? "https" : "http"}://${cfg.host}:${cfg.port} (data: ${cfg.dataDir})`);
       return 0;
     }

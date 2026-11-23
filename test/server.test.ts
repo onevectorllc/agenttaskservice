@@ -147,7 +147,7 @@ describe("AC-6: MCP tools end to end", () => {
       "created:laptop",
       "claimed:mini/s1",
       "note:mini/s1",
-      "completed:mini",
+      "completed:mini/s1",
     ]);
 
     const sent = await call(a, "list_sent_tasks", { project: "project-a" });

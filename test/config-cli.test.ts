@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { get as httpsGet, type Server } from "node:https";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -99,6 +99,24 @@ describe("AC-8: CLI", () => {
     expect(cli("project", "add", "video-studio", "--name", "Video", "--description", "Makes videos", "--alias", "vs").code).toBe(0);
     expect(cli("project", "list").out).toContain("video-studio\tVideo\tMakes videos");
     expect(cli("project", "add", "Bad Id").code).toBe(1);
+  });
+
+  it("AC-8: serve keeps the first admin token out of its output and in a 0600 file", async () => {
+    const dataDir = join(dir, "serve-data");
+    const file = join(dir, "serve.toml");
+    writeFileSync(file, `[server]\nport = 0\n[storage]\ndata_dir = "${dataDir}"\n`);
+    const lines: string[] = [];
+    let server: import("node:net").Server | undefined;
+    expect(run(["serve", "--config", file], (s) => lines.push(s), { onServer: (s) => (server = s) })).toBe(0);
+    try {
+      expect(lines.join("\n")).not.toMatch(/ats_/);
+      const tokenFile = join(dataDir, "admin-token");
+      expect(statSync(tokenFile).mode & 0o777).toBe(0o600);
+      const token = readFileSync(tokenFile, "utf8").trim();
+      expect(new Store(openDb(join(dataDir, "agenttaskservice.db"))).authenticate(token)).toBe("admin");
+    } finally {
+      await new Promise<void>((r) => (server ? server.close(() => r()) : r()));
+    }
   });
 
   it("AC-8: unknown commands print usage and fail", () => {

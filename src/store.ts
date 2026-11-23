@@ -279,7 +279,7 @@ export class Store {
       if (t.status !== "claimed") throw new TaskError("conflict", `Task ${id} is ${t.status}`, { task: t });
       this.mustHold(t, actor, session);
       const out = this.write(t, { status: "open", claimed_by: null, lease_until: null });
-      this.event(id, "released", actor);
+      this.event(id, "released", session ? `${actor}/${session}` : actor);
       return out;
     })();
   }
@@ -295,13 +295,16 @@ export class Store {
         throw new TaskError("conflict", `Task ${id} is already ${t.status}`, { task: t });
       }
       const out = this.write(t, { status: "done", result, done_at: this.iso(), lease_until: null });
-      this.event(id, "completed", actor, result);
+      this.event(id, "completed", session ? `${actor}/${session}` : actor, result);
       return out;
     })();
   }
 
-  /** The receiver rejects a task, or the sender cancels its own. */
-  rejectTask(actor: string, project: string, id: string, reason: string, version: number): Task {
+  /**
+   * The receiver rejects (only the claim holder while a claim is live), or the
+   * sender cancels its own task, which ends any live claim: the sender owns the request.
+   */
+  rejectTask(actor: string, project: string, id: string, reason: string, version: number, session?: string): Task {
     return this.db.transaction(() => {
       const t = this.mustGet(id);
       const isReceiver = t.to_project === project;
@@ -312,9 +315,10 @@ export class Store {
       if (t.status !== "open" && t.status !== "claimed") {
         throw new TaskError("conflict", `Task ${id} is already ${t.status}`, { task: t });
       }
+      if (isReceiver) this.mustHold(t, actor, session);
       const status: Status = isReceiver ? "rejected" : "cancelled";
       const out = this.write(t, { status, result: reason, done_at: this.iso(), lease_until: null });
-      this.event(id, status === "rejected" ? "rejected" : "cancelled", actor, reason);
+      this.event(id, status === "rejected" ? "rejected" : "cancelled", session ? `${actor}/${session}` : actor, reason);
       return out;
     })();
   }
