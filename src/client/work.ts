@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 
@@ -34,7 +34,7 @@ export const WORK_MCP_TOOLS = ["list_my_tasks", "get_task", "claim_task", "add_n
  * Never writable by the headless run, whatever the folder: files that make Claude Code or git
  * run commands later (settings with hooks, MCP config, git hooks and config).
  */
-export const WORK_DENY_PATHS = ["./.claude/**", "./**/.claude/**", "./**/settings*.json", "./.mcp.json", "./**/.mcp.json", "./.git/**", "./**/.git/**", "./.gitmodules"];
+export const WORK_DENY_PATHS = ["./.claude/**", "./**/.claude/**", "./**/settings*.json", "./.mcp.json", "./**/.mcp.json", "./.git/**", "./**/.git/**", "./.gitmodules", "./**/.envrc", "./**/.vscode/**", "./**/.husky/**"];
 
 export function claudeArgs(prompt: string, self: string[], url: string, opts: { restricted: boolean; promptsFlag: boolean }): string[] {
   const mcp = { mcpServers: { agenttaskservice: { type: "http", url: `${url}/mcp`, headersHelper: `${self.map(shellQuote).join(" ")} auth-header` } } };
@@ -78,11 +78,12 @@ function claudeFeatures(env: Env): { restricted: boolean; promptsFlag: boolean }
 
 /** Why `dir` must not be a work folder: it is, holds, or sits inside Claude Code's own config folder. */
 export function workDirProblem(dir: string, env: Env = process.env): string | undefined {
-  const d = resolve(dir);
-  const c = resolve(claudeDir(env));
+  const real = (p: string) => (existsSync(p) ? realpathSync(p) : resolve(p));
+  const d = real(dir);
+  const c = real(claudeDir(env));
   const inside = (a: string, b: string) => a === b || a.startsWith(b.endsWith(sep) ? b : b + sep);
   if (inside(d, c) || inside(c, d)) return `the work folder must not be or contain Claude Code's config folder (${c})`;
-  if (d === resolve(homeDir(env))) return "the work folder must not be your home folder";
+  if (d === real(homeDir(env))) return "the work folder must not be your home folder";
   return undefined;
 }
 

@@ -49,7 +49,7 @@ function line(t: any): string {
 export const HOOK_BUDGET_MS = 4000;
 /** Past this the hook prints one line and returns, even mid-request. */
 export const HOOK_HARD_LIMIT_MS = 7000;
-const hardLimit = (env: Env) => Number(env.AGENTTASK_HOOK_LIMIT_MS) || HOOK_HARD_LIMIT_MS;
+const hardLimit = (env: Env) => Math.min(Number(env.AGENTTASK_HOOK_LIMIT_MS) || HOOK_HARD_LIMIT_MS, HOOK_HARD_LIMIT_MS);
 
 /** Text for the session's context. A hook must not break or stall a session. */
 export async function sessionStart(cwd: string, env: Env = process.env): Promise<string> {
