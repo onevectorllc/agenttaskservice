@@ -79,6 +79,8 @@ lease. The sending project can always cancel its own task.
 | `GET /v1/inbox?project=<id>` | Bearer token | Open tasks for a project, plus the project's sent tasks that finished since it last asked (each shown once). Meant for session-start hooks. |
 | `POST /v1/pair` | pairing code | Trade a one-time pairing code (`{"code": "...", "name": "..."}`) for a new token. Wrong codes are rate limited. |
 | `GET /health` | none | Liveness check |
+| `GET /.well-known/oauth-protected-resource`, `GET /.well-known/oauth-authorization-server` | none | OAuth metadata (only with `server.public_url`) |
+| `POST /oauth/register`, `GET/POST /oauth/authorize`, `POST /oauth/token`, `POST /oauth/revoke` | see [Claude app connector](#claude-app-connector) | OAuth 2.1 for MCP clients |
 
 ## Configuration
 
@@ -94,6 +96,7 @@ or `AGENTTASK_CONFIG`). See [`examples/server.toml`](examples/server.toml).
 | `storage.data_dir` | `AGENTTASK_DATA_DIR` | `~/.local/share/agenttaskservice` (Linux), `~/Library/Application Support/agenttaskservice` (macOS) |
 | `tasks.lease_hours` | `AGENTTASK_LEASE_HOURS` | `4` (max 720) |
 | `server.max_body_bytes` | | `1000000` |
+| `server.public_url` | `AGENTTASK_PUBLIC_URL` | unset; the server's public https origin. Turns on OAuth for the Claude app |
 | `server.trust_proxy` | `AGENTTASK_TRUST_PROXY` | `false`; set it when a reverse proxy on the same host adds `X-Forwarded-For` (recommended behind a proxy), so rate limits apply per client |
 | `ui.enabled` | `AGENTTASK_UI_ENABLED` | `false` |
 | `ui.host`, `ui.port` | `AGENTTASK_UI_HOST`, `AGENTTASK_UI_PORT` | `127.0.0.1`, `7421` |
@@ -145,6 +148,29 @@ Wrong codes are rate limited: 10 failures per client in 10 minutes, and 100 in
 total. Behind a reverse proxy every request seems to come from the proxy, so
 without `server.trust_proxy` only the total limit applies (one client's mistakes
 can't lock everyone out). Revoking a token also signs out its browser sessions.
+
+## Claude app connector
+
+The Claude app (web, desktop and mobile) can use the task tools as a custom
+connector. It signs in with OAuth 2.1, as the MCP authorization spec describes:
+the server publishes OAuth metadata, the app registers itself, and you approve it
+once with a pairing code. No password is stored anywhere.
+
+1. Set `server.public_url` to the server's public https address (the one that
+   reaches the API, for example `https://tasks.example.com`) and restart.
+2. In the Claude app, open **Settings → Connectors → Add custom connector**. Give
+   it a name and the URL `https://tasks.example.com/mcp`, then select **Connect**.
+3. A page from your server opens, showing the app's name and where it will send
+   you back. Create a pairing code in the web UI (**Set up a machine**) or with
+   `agenttaskservice token pair`, enter it, and select **Approve**.
+4. The connection gets its own token name (for example `claude`), shown in
+   `token list`. `agenttaskservice token revoke <name>` disconnects the app.
+
+Details: authorization code with PKCE (S256) only, public clients only, redirect
+URIs must be https (or http on localhost) and match exactly. Access tokens last an
+hour; refresh tokens last 30 days and rotate on each use, and reusing an old one
+ends the connection. Codes and tokens are stored hashed. Wrong pairing codes on the
+approval page count toward the same rate limit as `POST /v1/pair`.
 
 ## Client setup
 

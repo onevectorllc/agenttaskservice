@@ -17,6 +17,8 @@ export interface Config {
   maxBodyBytes: number;
   /** A reverse proxy in front sets X-Forwarded-For; rate limits use its last entry. */
   trustProxy?: boolean;
+  /** The public https URL of this server. Set it to enable OAuth for the Claude app connector. */
+  publicUrl?: string;
   /** The web UI runs on its own listener, so a proxy that forwards only the API port never exposes it. */
   ui?: UiConfig;
 }
@@ -76,6 +78,7 @@ export function loadConfig(path?: string, env: Env = process.env): Config {
     dataDir: expandHome(env.AGENTTASK_DATA_DIR ?? storage.data_dir ?? defaultDataDir(env)),
     leaseHours: Number(env.AGENTTASK_LEASE_HOURS ?? tasks.lease_hours ?? 4),
     maxBodyBytes: Number(server.max_body_bytes ?? 1_000_000),
+    publicUrl: (env.AGENTTASK_PUBLIC_URL ?? server.public_url ?? undefined)?.replace(/\/+$/, ""),
     trustProxy: (env.AGENTTASK_TRUST_PROXY ?? String(server.trust_proxy ?? false)) === "true" || env.AGENTTASK_TRUST_PROXY === "1",
     ui: uiEnabled
       ? {
@@ -97,6 +100,16 @@ export function loadConfig(path?: string, env: Env = process.env): Config {
   if (cfg.ui) {
     if (!Number.isInteger(cfg.ui.port) || cfg.ui.port < 0 || cfg.ui.port > 65535) throw new Error(`Invalid ui.port: ${cfg.ui.port}`);
     if (cfg.ui.port !== 0 && cfg.ui.port === cfg.port && cfg.ui.host === cfg.host) throw new Error("ui.port must differ from server.port");
+  }
+  if (cfg.publicUrl) {
+    let u: URL;
+    try {
+      u = new URL(cfg.publicUrl);
+    } catch {
+      throw new Error(`Invalid server.public_url: ${cfg.publicUrl}`);
+    }
+    if (u.protocol !== "https:" && !isLoopback(u.hostname)) throw new Error("server.public_url must use https (OAuth needs it)");
+    if (u.pathname !== "/" || u.search || u.hash) throw new Error("server.public_url is the server's origin only, without a path");
   }
   if (Boolean(cfg.tlsCert) !== Boolean(cfg.tlsKey)) throw new Error("Set both tls.cert and tls.key, or neither");
   return cfg;

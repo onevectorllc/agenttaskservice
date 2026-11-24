@@ -1,6 +1,6 @@
 // Copyright (c) 2026 OneVector LLC
 // SPDX-License-Identifier: MIT
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { DB } from "./db.js";
 
 export type Status = "open" | "claimed" | "done" | "rejected" | "cancelled";
@@ -365,6 +365,8 @@ export class Store {
     return this.db.transaction(() => {
       // Sign the token's browsers out too; sessions are also bound to the token itself (see getSession).
       this.db.prepare("DELETE FROM ui_sessions WHERE token_name = ?").run(name);
+      this.db.prepare("DELETE FROM oauth_tokens WHERE token_name = ?").run(name);
+      this.db.prepare("DELETE FROM oauth_codes WHERE token_name = ?").run(name);
       return this.db.prepare("UPDATE tokens SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL").run(this.iso(), name).changes === 1;
     })();
   }
@@ -384,9 +386,16 @@ export class Store {
 
   /** Returns the token's name when it is valid and not revoked, and records when it was last used (at most once a minute). */
   authenticate(token: string): string | undefined {
-    const r = this.db.prepare("SELECT name, last_used_at FROM tokens WHERE hash = ? AND revoked_at IS NULL").get(Store.hashToken(token)) as
-      | { name: string; last_used_at: string | null }
-      | undefined;
+    const r = (
+      token.startsWith(ACCESS_PREFIX)
+        ? this.db
+            .prepare(
+              `SELECT t.name, t.last_used_at FROM oauth_tokens o JOIN tokens t ON t.name = o.token_name AND t.hash = o.token_hash
+               WHERE o.hash = ? AND o.kind = 'access' AND o.expires_at > ? AND t.revoked_at IS NULL`,
+            )
+            .get(Store.hashToken(token), this.iso())
+        : this.db.prepare("SELECT name, last_used_at FROM tokens WHERE hash = ? AND revoked_at IS NULL").get(Store.hashToken(token))
+    ) as { name: string; last_used_at: string | null } | undefined;
     if (!r) return undefined;
     const now = this.now().getTime();
     if (!r.last_used_at || now - Date.parse(r.last_used_at) > 60_000) {
@@ -456,6 +465,137 @@ export class Store {
     this.db.prepare("DELETE FROM ui_sessions WHERE hash = ?").run(Store.hashToken(sid));
   }
 
+  // ---- OAuth (Claude app connector) ----
+
+  /** Dynamic client registration. Public clients only (PKCE, no secret). Unused registrations are pruned. */
+  registerClient(name: string, redirectUris: string[]): { client_id: string; client_id_issued_at: number } {
+    return this.db.transaction(() => {
+      const now = this.now().getTime();
+      const count = () => (this.db.prepare("SELECT count(*) AS n FROM oauth_clients").get() as { n: number }).n;
+      if (count() >= MAX_CLIENTS) {
+        this.db
+          .prepare("DELETE FROM oauth_clients WHERE last_used_at IS NULL AND created_at < ?")
+          .run(new Date(now - 24 * 3_600_000).toISOString());
+      }
+      if (count() >= MAX_CLIENTS) throw new OAuthError("invalid_client_metadata", "Too many registered clients; try again tomorrow");
+      const id = `atc_${randomBytes(16).toString("base64url")}`;
+      this.db
+        .prepare("INSERT INTO oauth_clients (id, name, redirect_uris, created_at) VALUES (?, ?, ?, ?)")
+        .run(id, name, JSON.stringify(redirectUris), new Date(now).toISOString());
+      return { client_id: id, client_id_issued_at: Math.floor(now / 1000) };
+    })();
+  }
+
+  getClient(id: string): { id: string; name: string; redirect_uris: string[] } | undefined {
+    const r = this.db.prepare("SELECT id, name, redirect_uris FROM oauth_clients WHERE id = ?").get(id) as
+      | { id: string; name: string; redirect_uris: string }
+      | undefined;
+    return r && { id: r.id, name: r.name, redirect_uris: JSON.parse(r.redirect_uris) as string[] };
+  }
+
+  /**
+   * The owner approved a client with a pairing code: create the connection's token row (its secret is never shown;
+   * the app only gets OAuth tokens bound to it) and a one-time authorization code.
+   */
+  approveClient(input: {
+    pairingCode: string;
+    name?: string;
+    clientId: string;
+    redirectUri: string;
+    codeChallenge: string;
+    scope: string;
+  }): { code: string; name: string } {
+    return this.db.transaction(() => {
+      const { name, token } = this.redeemPairing(input.pairingCode, input.name);
+      const code = randomBytes(32).toString("base64url");
+      this.db
+        .prepare(
+          `INSERT INTO oauth_codes (hash, client_id, redirect_uri, code_challenge, token_name, token_hash, scope, expires_at, grant_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          Store.hashToken(code),
+          input.clientId,
+          input.redirectUri,
+          input.codeChallenge,
+          name,
+          Store.hashToken(token),
+          input.scope,
+          new Date(this.now().getTime() + CODE_MS).toISOString(),
+          randomBytes(16).toString("base64url"),
+        );
+      return { code, name };
+    })();
+  }
+
+  /** authorization_code grant with PKCE (S256). A code works once; replaying it revokes what it issued. */
+  exchangeCode(code: string, clientId: string, redirectUri: string, verifier: string): OAuthTokens {
+    return this.grantStep(() => {
+      const row = this.db.prepare("SELECT * FROM oauth_codes WHERE hash = ?").get(Store.hashToken(code)) as CodeRow | undefined;
+      if (!row) throw new OAuthError("invalid_grant", "Unknown authorization code");
+      if (row.used_at) throw new GrantReuse(row.grant_id, "Authorization code already used");
+      if (row.expires_at <= this.iso()) throw new OAuthError("invalid_grant", "Authorization code expired");
+      if (row.client_id !== clientId || row.redirect_uri !== redirectUri) throw new OAuthError("invalid_grant", "Code was issued to another client or redirect URI");
+      if (!/^[A-Za-z0-9._~-]{43,128}$/.test(verifier) || !sameString(s256(verifier), row.code_challenge)) {
+        throw new OAuthError("invalid_grant", "PKCE verification failed");
+      }
+      this.db.prepare("UPDATE oauth_codes SET used_at = ? WHERE hash = ?").run(this.iso(), row.hash);
+      return this.issueTokens(row);
+    });
+  }
+
+  /** refresh_token grant. Refresh tokens rotate; presenting a used one revokes the whole grant (theft detection). */
+  refreshTokens(refreshToken: string, clientId: string): OAuthTokens {
+    return this.grantStep(() => {
+      const row = this.db.prepare("SELECT * FROM oauth_tokens WHERE hash = ? AND kind = 'refresh'").get(Store.hashToken(refreshToken)) as
+        | (CodeRow & { used_at: string | null })
+        | undefined;
+      if (!row) throw new OAuthError("invalid_grant", "Unknown refresh token");
+      if (row.client_id !== clientId) throw new OAuthError("invalid_grant", "Refresh token was issued to another client");
+      if (row.used_at) throw new GrantReuse(row.grant_id, "Refresh token already used; the connection was revoked");
+      if (row.expires_at <= this.iso()) throw new OAuthError("invalid_grant", "Refresh token expired");
+      this.db.prepare("UPDATE oauth_tokens SET used_at = ? WHERE hash = ?").run(this.iso(), row.hash);
+      return this.issueTokens(row);
+    });
+  }
+
+  /** Run a token-grant step in a transaction. On a replayed code or refresh token, revoke that grant after the rollback. */
+  private grantStep(fn: () => OAuthTokens): OAuthTokens {
+    try {
+      return this.db.transaction(fn)();
+    } catch (e) {
+      if (!(e instanceof GrantReuse)) throw e;
+      this.db.prepare("DELETE FROM oauth_tokens WHERE grant_id = ?").run(e.grantId);
+      throw new OAuthError("invalid_grant", e.message);
+    }
+  }
+
+  /** RFC 7009: revoking either token ends the whole grant. Unknown tokens are not an error. */
+  revokeOAuthToken(token: string): void {
+    const row = this.db.prepare("SELECT grant_id FROM oauth_tokens WHERE hash = ?").get(Store.hashToken(token)) as { grant_id: string } | undefined;
+    if (row) this.db.prepare("DELETE FROM oauth_tokens WHERE grant_id = ?").run(row.grant_id);
+  }
+
+  private issueTokens(g: { grant_id: string; client_id: string; token_name: string; token_hash: string; scope: string }): OAuthTokens {
+    const active = this.db.prepare("SELECT 1 FROM tokens WHERE name = ? AND hash = ? AND revoked_at IS NULL").get(g.token_name, g.token_hash);
+    if (!active) throw new OAuthError("invalid_grant", "This connection's token was revoked");
+    const now = this.now().getTime();
+    const nowIso = new Date(now).toISOString();
+    // Housekeeping: drop expired rows (used refresh tokens are kept until expiry for reuse detection).
+    this.db.prepare("DELETE FROM oauth_tokens WHERE expires_at <= ?").run(nowIso);
+    this.db.prepare("DELETE FROM oauth_codes WHERE expires_at <= ?").run(new Date(now - 24 * 3_600_000).toISOString());
+    const access = `${ACCESS_PREFIX}${randomBytes(32).toString("base64url")}`;
+    const refresh = `${REFRESH_PREFIX}${randomBytes(32).toString("base64url")}`;
+    const insert = this.db.prepare(
+      `INSERT INTO oauth_tokens (hash, kind, grant_id, client_id, token_name, token_hash, scope, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    insert.run(Store.hashToken(access), "access", g.grant_id, g.client_id, g.token_name, g.token_hash, g.scope, nowIso, new Date(now + ACCESS_MS).toISOString());
+    insert.run(Store.hashToken(refresh), "refresh", g.grant_id, g.client_id, g.token_name, g.token_hash, g.scope, nowIso, new Date(now + REFRESH_MS).toISOString());
+    this.db.prepare("UPDATE oauth_clients SET last_used_at = ? WHERE id = ?").run(nowIso, g.client_id);
+    return { access_token: access, token_type: "Bearer", expires_in: ACCESS_MS / 1000, refresh_token: refresh, scope: g.scope };
+  }
+
   /** Per project: open and claimed tasks it received, open tasks it sent. Expired claims count as open. */
   projectSummary(): { id: string; name: string; description: string; inbox_open: number; inbox_claimed: number; sent_active: number }[] {
     const projects = this.listProjects();
@@ -475,6 +615,64 @@ export class Store {
 }
 
 const TOKEN_NAME = /^[A-Za-z0-9._-]{1,64}$/;
+
+/** An OAuth protocol error: `error` is the RFC 6749 error code sent to the client. */
+export class OAuthError extends Error {
+  constructor(
+    public error: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/** Internal: a replayed code or refresh token. The grant is revoked outside the rolled-back transaction. */
+class GrantReuse extends Error {
+  constructor(
+    public grantId: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export interface OAuthTokens {
+  access_token: string;
+  token_type: "Bearer";
+  expires_in: number;
+  refresh_token: string;
+  scope: string;
+}
+
+interface CodeRow {
+  hash: string;
+  client_id: string;
+  redirect_uri: string;
+  code_challenge: string;
+  token_name: string;
+  token_hash: string;
+  scope: string;
+  expires_at: string;
+  used_at: string | null;
+  grant_id: string;
+}
+
+const ACCESS_PREFIX = "ata_";
+const REFRESH_PREFIX = "atr_";
+const ACCESS_MS = 3_600_000;
+const REFRESH_MS = 30 * 24 * 3_600_000;
+const CODE_MS = 5 * 60_000;
+const MAX_CLIENTS = 200;
+
+export function s256(verifier: string): string {
+  return createHash("sha256").update(verifier, "ascii").digest("base64url");
+}
+
+function sameString(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
 /** No 0/O, 1/I/L: easy to read aloud and type. 8 characters from 31 = about 40 bits, single use, 10 minutes. */
 const PAIR_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 
