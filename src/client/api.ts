@@ -46,6 +46,26 @@ export async function getJson(conn: Conn, path: string): Promise<any> {
   return body;
 }
 
+/** Trade a one-time pairing code for a new token (POST /v1/pair). The reply is the only place the token appears. */
+export async function redeemPairCode(url: string, code: string, name?: string, timeoutMs = 10_000): Promise<{ name: string; token: string }> {
+  let res: Response;
+  try {
+    res = await fetch(`${url}/v1/pair`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code, ...(name ? { name } : {}) }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (e) {
+    throw new Unreachable(e instanceof Error ? e.message : String(e));
+  }
+  if (res.status >= 500) throw new Unreachable(`server error ${res.status}`);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Refused(body.message ?? `HTTP ${res.status}`, body.error);
+  if (typeof body.token !== "string" || typeof body.name !== "string") throw new Refused("unexpected pairing reply");
+  return { name: body.name, token: body.token };
+}
+
 function toolText(r: { content?: { type: string; text?: string }[] }): string {
   return r.content?.find((c) => c.type === "text")?.text ?? "";
 }

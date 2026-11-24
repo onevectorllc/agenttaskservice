@@ -362,14 +362,19 @@ export class Store {
   }
 
   revokeToken(name: string): boolean {
-    return this.db.prepare("UPDATE tokens SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL").run(this.iso(), name).changes === 1;
+    return this.db.transaction(() => {
+      // Sign the token's browsers out too; sessions are also bound to the token itself (see getSession).
+      this.db.prepare("DELETE FROM ui_sessions WHERE token_name = ?").run(name);
+      return this.db.prepare("UPDATE tokens SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL").run(this.iso(), name).changes === 1;
+    })();
   }
 
-  listTokens(): { name: string; created_at: string; revoked_at: string | null }[] {
-    return this.db.prepare("SELECT name, created_at, revoked_at FROM tokens ORDER BY name").all() as {
+  listTokens(): { name: string; created_at: string; revoked_at: string | null; last_used_at: string | null }[] {
+    return this.db.prepare("SELECT name, created_at, revoked_at, last_used_at FROM tokens ORDER BY name").all() as {
       name: string;
       created_at: string;
       revoked_at: string | null;
+      last_used_at: string | null;
     }[];
   }
 
@@ -377,11 +382,112 @@ export class Store {
     return (this.db.prepare("SELECT COUNT(*) AS n FROM tokens WHERE revoked_at IS NULL").get() as { n: number }).n;
   }
 
-  /** Returns the token's name when it is valid and not revoked. */
+  /** Returns the token's name when it is valid and not revoked, and records when it was last used (at most once a minute). */
   authenticate(token: string): string | undefined {
-    const r = this.db.prepare("SELECT name FROM tokens WHERE hash = ? AND revoked_at IS NULL").get(Store.hashToken(token)) as
-      | { name: string }
+    const r = this.db.prepare("SELECT name, last_used_at FROM tokens WHERE hash = ? AND revoked_at IS NULL").get(Store.hashToken(token)) as
+      | { name: string; last_used_at: string | null }
       | undefined;
-    return r?.name;
+    if (!r) return undefined;
+    const now = this.now().getTime();
+    if (!r.last_used_at || now - Date.parse(r.last_used_at) > 60_000) {
+      this.db.prepare("UPDATE tokens SET last_used_at = ? WHERE name = ?").run(new Date(now).toISOString(), r.name);
+    }
+    return r.name;
   }
+
+  // ---- pairing codes ----
+
+  /** A one-time code that a new machine exchanges for its own token. Only the hash is stored. */
+  createPairing(createdBy: string, opts: { name?: string; minutes?: number } = {}): { code: string; expires_at: string } {
+    if (opts.name !== undefined && !TOKEN_NAME.test(opts.name)) throw new TaskError("invalid", "Token name: letters, digits, . _ - (max 64)");
+    const minutes = opts.minutes ?? 10;
+    if (!(minutes >= 1 && minutes <= 60)) throw new TaskError("invalid", "A pairing code lasts 1 to 60 minutes");
+    const code = pairingCode();
+    const expires_at = new Date(this.now().getTime() + minutes * 60_000).toISOString();
+    this.db
+      .prepare("INSERT INTO pairings (hash, name, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")
+      .run(Store.hashToken(normalisePairingCode(code)), opts.name ?? null, createdBy, this.iso(), expires_at);
+    return { code, expires_at };
+  }
+
+  /** Exchange a pairing code for a new token. The code works once, before it expires. */
+  redeemPairing(code: string, name?: string): { name: string; token: string } {
+    return this.db.transaction(() => {
+      const row = this.db.prepare("SELECT name, expires_at, used_at FROM pairings WHERE hash = ?").get(Store.hashToken(normalisePairingCode(code))) as
+        | { name: string | null; expires_at: string; used_at: string | null }
+        | undefined;
+      if (!row || row.used_at || row.expires_at <= this.iso()) throw new TaskError("forbidden", "Invalid or expired pairing code");
+      const tokenName = row.name ?? name;
+      if (!tokenName) throw new TaskError("invalid", "Give the new token a name");
+      const token = this.addToken(tokenName);
+      this.db
+        .prepare("UPDATE pairings SET used_at = ?, used_for = ? WHERE hash = ?")
+        .run(this.iso(), tokenName, Store.hashToken(normalisePairingCode(code)));
+      return { name: tokenName, token };
+    })();
+  }
+
+  // ---- web UI sessions ----
+
+  createSession(tokenName: string, hours = 12): { sid: string; csrf: string } {
+    const sid = randomBytes(32).toString("base64url");
+    const csrf = randomBytes(24).toString("base64url");
+    const now = this.now().getTime();
+    this.db.prepare("DELETE FROM ui_sessions WHERE expires_at <= ?").run(new Date(now).toISOString());
+    const token = this.db.prepare("SELECT hash FROM tokens WHERE name = ? AND revoked_at IS NULL").get(tokenName) as { hash: string } | undefined;
+    if (!token) throw new TaskError("forbidden", "No active token with that name");
+    this.db
+      .prepare("INSERT INTO ui_sessions (hash, token_name, token_hash, csrf, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(Store.hashToken(sid), tokenName, token.hash, csrf, new Date(now).toISOString(), new Date(now + hours * 3_600_000).toISOString());
+    return { sid, csrf };
+  }
+
+  /** A live session whose token is still active, or undefined. Bound to the token itself, so a new token under a reused name never revives old sessions. */
+  getSession(sid: string): { token_name: string; csrf: string } | undefined {
+    return this.db
+      .prepare(
+        `SELECT s.token_name, s.csrf FROM ui_sessions s JOIN tokens t ON t.name = s.token_name AND t.hash = s.token_hash
+         WHERE s.hash = ? AND s.expires_at > ? AND t.revoked_at IS NULL`,
+      )
+      .get(Store.hashToken(sid), this.iso()) as { token_name: string; csrf: string } | undefined;
+  }
+
+  deleteSession(sid: string): void {
+    this.db.prepare("DELETE FROM ui_sessions WHERE hash = ?").run(Store.hashToken(sid));
+  }
+
+  /** Per project: open and claimed tasks it received, open tasks it sent. Expired claims count as open. */
+  projectSummary(): { id: string; name: string; description: string; inbox_open: number; inbox_claimed: number; sent_active: number }[] {
+    const projects = this.listProjects();
+    return projects.map((p) => {
+      const inbox = this.listInbox(p.id);
+      const sent = this.listSent(p.id).filter((t) => t.status === "open" || t.status === "claimed");
+      return {
+        id: p.id,
+        name: p.name,
+        description: p.description,
+        inbox_open: inbox.filter((t) => t.status === "open").length,
+        inbox_claimed: inbox.filter((t) => t.status === "claimed").length,
+        sent_active: sent.length,
+      };
+    });
+  }
+}
+
+const TOKEN_NAME = /^[A-Za-z0-9._-]{1,64}$/;
+/** No 0/O, 1/I/L: easy to read aloud and type. 8 characters from 31 = about 40 bits, single use, 10 minutes. */
+const PAIR_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+
+function pairingCode(): string {
+  // Rejection sampling: keep only bytes below the largest multiple of 31, so every character is equally likely.
+  const limit = 256 - (256 % PAIR_ALPHABET.length);
+  const chars: string[] = [];
+  while (chars.length < 8) {
+    for (const b of randomBytes(16)) if (b < limit && chars.length < 8) chars.push(PAIR_ALPHABET[b % PAIR_ALPHABET.length]);
+  }
+  return `${chars.slice(0, 4).join("")}-${chars.slice(4).join("")}`;
+}
+
+export function normalisePairingCode(code: string): string {
+  return code.toUpperCase().replace(/[^0-9A-Z]/g, "");
 }

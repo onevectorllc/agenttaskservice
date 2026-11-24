@@ -6,7 +6,9 @@ import https from "node:https";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Config } from "./config.js";
 import { createMcpServer } from "./mcp.js";
+import { clientKey, FailureLimit } from "./ratelimit.js";
 import { PROJECT_ID, Store, TaskError } from "./store.js";
+import { createUiHandler } from "./ui.js";
 
 function send(res: ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body);
@@ -58,13 +60,35 @@ export interface Handler {
   (req: IncomingMessage, res: ServerResponse): Promise<void>;
 }
 
-export function createHandler(store: Store, cfg: Pick<Config, "maxBodyBytes">): Handler {
+export function createHandler(store: Store, cfg: Pick<Config, "maxBodyBytes" | "trustProxy">, pairLimit = new FailureLimit()): Handler {
   return async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     try {
       if (url.pathname === "/health") {
         if (req.method !== "GET") return send(res, 405, { error: "method_not_allowed" });
         return send(res, 200, { status: "ok", service: "agenttaskservice" });
+      }
+
+      if (url.pathname === "/v1/pair") {
+        // A new machine trades a one-time pairing code for its own token. No bearer token needed.
+        if (req.method !== "POST") return send(res, 405, { error: "method_not_allowed" });
+        const who = clientKey(req, cfg.trustProxy);
+        if (pairLimit.blocked(who)) return send(res, 429, { error: "rate_limited", message: "Too many failed pairing attempts; try again later" });
+        let body: { code?: unknown; name?: unknown };
+        try {
+          body = JSON.parse(await readBody(req, 4096));
+        } catch {
+          return send(res, 400, { error: "invalid", message: "Send JSON: {\"code\": \"...\", \"name\": \"...\"}" });
+        }
+        if (typeof body.code !== "string" || (body.name !== undefined && typeof body.name !== "string")) {
+          return send(res, 400, { error: "invalid", message: "code (and optional name) must be strings" });
+        }
+        try {
+          return send(res, 200, store.redeemPairing(body.code, body.name as string | undefined));
+        } catch (e) {
+          if (e instanceof TaskError && e.code === "forbidden") pairLimit.fail(who);
+          throw e;
+        }
       }
 
       const token = bearer(req);
@@ -113,15 +137,17 @@ export function createHandler(store: Store, cfg: Pick<Config, "maxBodyBytes">): 
 
       return send(res, 404, { error: "not_found" });
     } catch (e) {
-      if (e instanceof TaskError) return send(res, e.code === "not_found" ? 404 : 400, { error: e.code, message: e.message });
+      if (e instanceof TaskError) {
+        const status = { not_found: 404, forbidden: 403, conflict: 409, invalid: 400 }[e.code];
+        return send(res, status, { error: e.code, message: e.message });
+      }
       console.error("request failed:", e instanceof Error ? e.message : e);
       if (!res.headersSent) send(res, 500, { error: "internal" });
     }
   };
 }
 
-export function startServer(store: Store, cfg: Config): http.Server | https.Server {
-  const handler = createHandler(store, cfg);
+function listen(handler: Handler, cfg: Config, port: number, host: string): http.Server | https.Server {
   const listener = (req: IncomingMessage, res: ServerResponse) => void handler(req, res);
   const server =
     cfg.tlsCert && cfg.tlsKey
@@ -129,6 +155,16 @@ export function startServer(store: Store, cfg: Config): http.Server | https.Serv
       : http.createServer(listener);
   server.requestTimeout = 30_000;
   server.headersTimeout = 10_000;
-  server.listen(cfg.port, cfg.host);
+  server.listen(port, host);
   return server;
+}
+
+export function startServer(store: Store, cfg: Config): http.Server | https.Server {
+  return listen(createHandler(store, cfg), cfg, cfg.port, cfg.host);
+}
+
+/** The web UI on its own port. Keep it off the public proxy route: it is meant for the local network. */
+export function startUi(store: Store, cfg: Config): http.Server | https.Server | undefined {
+  if (!cfg.ui) return undefined;
+  return listen(createUiHandler(store, { secure: Boolean(cfg.tlsCert), apiUrl: cfg.ui.apiUrl, repoUrl: cfg.ui.repoUrl }), cfg, cfg.ui.port, cfg.ui.host);
 }

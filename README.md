@@ -77,6 +77,7 @@ lease. The sending project can always cancel its own task.
 | --- | --- | --- |
 | `POST /mcp` | Bearer token | MCP, stateless Streamable HTTP |
 | `GET /v1/inbox?project=<id>` | Bearer token | Open tasks for a project, plus the project's sent tasks that finished since it last asked (each shown once). Meant for session-start hooks. |
+| `POST /v1/pair` | pairing code | Trade a one-time pairing code (`{"code": "...", "name": "..."}`) for a new token. Wrong codes are rate limited. |
 | `GET /health` | none | Liveness check |
 
 ## Configuration
@@ -93,6 +94,11 @@ or `AGENTTASK_CONFIG`). See [`examples/server.toml`](examples/server.toml).
 | `storage.data_dir` | `AGENTTASK_DATA_DIR` | `~/.local/share/agenttaskservice` (Linux), `~/Library/Application Support/agenttaskservice` (macOS) |
 | `tasks.lease_hours` | `AGENTTASK_LEASE_HOURS` | `4` (max 720) |
 | `server.max_body_bytes` | | `1000000` |
+| `server.trust_proxy` | `AGENTTASK_TRUST_PROXY` | `false`; set it when a reverse proxy on the same host adds `X-Forwarded-For` (recommended behind a proxy), so rate limits apply per client |
+| `ui.enabled` | `AGENTTASK_UI_ENABLED` | `false` |
+| `ui.host`, `ui.port` | `AGENTTASK_UI_HOST`, `AGENTTASK_UI_PORT` | `127.0.0.1`, `7421` |
+| `ui.api_url` | `AGENTTASK_UI_API_URL` | unset; the API URL that the setup guide puts in its commands |
+| `ui.repo_url` | `AGENTTASK_UI_REPO_URL` | unset; the `git clone` URL that the setup guide shows |
 
 ### Two ways to run it
 
@@ -103,6 +109,42 @@ or `AGENTTASK_CONFIG`). See [`examples/server.toml`](examples/server.toml).
   either way.
 
 Example service units are in [`examples/`](examples/).
+
+## Web UI
+
+With `ui.enabled = true`, `serve` also starts a small web UI on its own port
+(`ui.host` / `ui.port`). It is meant for your local network: set `ui.host` to the
+server's LAN address and do not route that port through a public proxy. The API
+port never serves the UI, so a proxy that forwards only the API cannot expose it.
+
+- **Sign in** with any active token. The browser gets an HttpOnly, SameSite=Strict
+  session cookie for 12 hours (Secure when the server uses TLS). Every form has a
+  CSRF token, and failed sign-ins are rate limited.
+- **Projects and tasks:** open and in-progress counts per project, each project's
+  received and sent tasks, and each task's details and history. Pages are plain
+  HTML with a strict Content-Security-Policy and no JavaScript.
+- **Set up a machine** (`/ui/setup`): a step-by-step guide that creates a pairing
+  code, shows the exact `init` command to run on the new machine, and lists the
+  connected machines with when each was last seen.
+
+### Pairing a new machine
+
+A pairing code saves copying a token between machines. Create one in the UI or with
+`agenttaskservice token pair [--name <machine>]` on the server. It works once, within
+10 minutes. On the new machine:
+
+```sh
+agenttaskservice init --url https://tasks.example.com --pair ABCD-2345 --name laptop --rule
+```
+
+`init` trades the code for the machine's own token only after you confirm the
+changes, so a `--dry-run` or a "no" leaves the code unused. The server stores only
+a hash of each code.
+
+Wrong codes are rate limited: 10 failures per client in 10 minutes, and 100 in
+total. Behind a reverse proxy every request seems to come from the proxy, so
+without `server.trust_proxy` only the total limit applies (one client's mistakes
+can't lock everyone out). Revoking a token also signs out its browser sessions.
 
 ## Client setup
 
@@ -169,11 +211,11 @@ if nobody else changed the task after it was queued.
 
 ```text
 agenttaskservice serve
-agenttaskservice token add <name> | token list | token revoke <name>
+agenttaskservice token add <name> | token pair [--name N] | token list | token revoke <name>
 agenttaskservice project add <id> [--name N] [--description D] [--alias A ...]
 agenttaskservice project list
 
-agenttaskservice init [--url U] [--workspace-root D] [--watch P]... [--rule] [--insecure] [--yes] [--dry-run]
+agenttaskservice init [--url U] [--pair CODE [--name N]] [--workspace-root D] [--watch P]... [--rule] [--insecure] [--yes] [--dry-run]
                       [--work P [--every MIN] [--work-dir D] [--work-prompt F]]
 agenttaskservice whoami | flush | auth-header | hook session-start
 agenttaskservice work --inbox P [--prompt-file F] [--dir D] [--dry-run]
