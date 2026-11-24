@@ -44,14 +44,24 @@ export function readToken(store: TokenStore, env: Env = process.env): string | u
   }
 }
 
-export function writeToken(store: TokenStore, token: string, env: Env = process.env): void {
-  if (store === "keychain") {
+/** Run a store command. On failure the error names the tool and exit status only, never its arguments (they hold the token). */
+function store(cmd: string, args: string[], input: string | undefined, hint: string, env: Env): void {
+  const r = spawnSync(cmd, args, { env: env as NodeJS.ProcessEnv, input, stdio: [input === undefined ? "ignore" : "pipe", "ignore", "ignore"] });
+  if (r.status === 0) return;
+  const why = r.error ? (r.error as NodeJS.ErrnoException).code ?? "could not start" : `exit ${r.status ?? r.signal}`;
+  throw new Error(`could not store the token with ${cmd} (${why}). ${hint}`);
+}
+
+export function writeToken(store_: TokenStore, token: string, env: Env = process.env): void {
+  const fallback = "Set AGENTTASK_TOKEN_STORE=file to keep it in a file readable only by you instead.";
+  if (store_ === "keychain") {
     // -U updates an existing item. The value is briefly visible to local `ps`; the keychain offers no stdin option.
-    execFileSync("security", ["add-generic-password", "-U", "-s", SERVICE, "-a", ACCOUNT, "-w", token], { stdio: "ignore" });
+    store("security", ["add-generic-password", "-U", "-s", SERVICE, "-a", ACCOUNT, "-w", token], undefined,
+      `If the keychain is locked (common over SSH), run \`security unlock-keychain\` first. ${fallback}`, env);
     return;
   }
-  if (store === "secret-tool") {
-    execFileSync("secret-tool", ["store", "--label", SERVICE, "service", SERVICE, "account", ACCOUNT], { input: token, stdio: ["pipe", "ignore", "ignore"] });
+  if (store_ === "secret-tool") {
+    store("secret-tool", ["store", "--label", SERVICE, "service", SERVICE, "account", ACCOUNT], token, fallback, env);
     return;
   }
   const f = tokenFile(env);

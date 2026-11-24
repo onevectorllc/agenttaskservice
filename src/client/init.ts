@@ -305,7 +305,8 @@ export async function runInit(argv: string[], out: Out = console.log, env: Env =
     try {
       s.apply();
     } catch (e) {
-      out(`error: ${s.what} failed: ${(e as Error).message}`);
+      // Belt and braces: no step's error may echo the token.
+      out(`error: ${s.what} failed: ${(e as Error).message.split(token!).join("[redacted]")}`);
       return 1;
     }
   }

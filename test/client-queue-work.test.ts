@@ -168,6 +168,18 @@ describe("token safety", () => {
     expect(hook.split("\n")).toHaveLength(1);
   });
 
+  it("a failing keychain store never shows the token", async () => {
+    // Fake `security` that fails the way a locked keychain does over SSH.
+    writeFileSync(join(fakeBin, "security"), "#!/bin/sh\necho \"SecKeychainItemCreateFromContent: User interaction is not allowed. $*\" >&2\nexit 36\n");
+    chmodSync(join(fakeBin, "security"), 0o755);
+    const c = capture();
+    const e = { ...env, AGENTTASK_TOKEN_STORE: "keychain", AGENTTASK_TOKEN: token };
+    expect(await runInit(["--url", base, "--yes"], c.out, e)).toBe(1);
+    expect(c.text()).toContain("could not store the token with security (exit 36)");
+    expect(c.text()).toContain("AGENTTASK_TOKEN_STORE=file");
+    expect(c.text()).not.toContain(token);
+  });
+
   it("quotes the hook command for the shell", () => {
     expect(shellQuote("/usr/local/bin/node")).toBe("/usr/local/bin/node");
     expect(shellQuote("/a b/$x`y`")).toBe("'/a b/$x`y`'");
