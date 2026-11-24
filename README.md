@@ -15,8 +15,117 @@ so Claude Code and other MCP clients can call it directly.
 - Append-only history of every change.
 - Runs on its own (optional built-in TLS) or behind any reverse proxy.
 
-> Status: early. Phase 1 (the core service) is here; the session-start hook,
-> an offline queue and a web UI with a setup guide are planned.
+## How it works
+
+### The idea
+
+Projects don't share files to pass work along: they share one small server.
+A task is a message with a lifecycle. One project's session sends it, and the other
+project's session picks it up the next time it starts. The result comes back the same way.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Project A session
+    participant S as agenttaskservice
+    participant B as Project B session
+    A->>S: create_task(to: project-b, "Adopt the new gateway")
+    Note over B: Later, a session starts in project B
+    S-->>B: Session-start hook: "1 open task for project-b"
+    B->>S: claim_task (lease, so a crash never holds it forever)
+    B->>S: add_note("Config migrated, testing next")
+    B->>S: complete_task(result: "Done, see pull request 42")
+    Note over A: Next session in project A
+    S-->>A: Session-start hook: "Your task T-12 is done: Done, see pull request 42"
+```
+
+### Topology
+
+One server holds every task. Machines that run Claude Code talk to its API with their
+own tokens. The Claude app connects to the same API with OAuth. The web UI has its own
+port, meant for the local network only, so a proxy that forwards only the API can't expose it.
+
+```mermaid
+flowchart LR
+    subgraph machines["Machines that run Claude Code"]
+        direction TB
+        M1["Laptop<br/>Claude Code + hook + CLI<br/>offline queue"]
+        M2["Desktop<br/>Claude Code + hook + CLI<br/>scheduled inbox work"]
+    end
+    App["Claude app<br/>(custom connector)"]
+    Browser["Browser on the<br/>local network"]
+
+    subgraph host["Server host"]
+        direction TB
+        Proxy["Reverse proxy, TLS<br/>(optional)"]
+        API["API port 7420<br/>/mcp · /v1 · /oauth"]
+        UI["Web UI port 7421<br/>/ui (LAN only)"]
+        DB[("SQLite<br/>one file")]
+        Proxy --> API
+        API --> DB
+        UI --> DB
+    end
+
+    M1 -- "MCP over HTTPS<br/>bearer token" --> Proxy
+    M2 -- "MCP over HTTPS<br/>bearer token" --> Proxy
+    App -- "MCP over HTTPS<br/>OAuth 2.1" --> Proxy
+    Browser -- "sign in with a token" --> UI
+```
+
+- **Single source of truth.** One process and one SQLite file. Nothing to sync between machines, nothing to merge.
+- **Every write is safe.** Each task has a version. A write based on a stale version is refused, so two sessions can't overwrite each other.
+- **Nothing gets stuck.** A claim is a lease. If a session crashes, the lease runs out and the task is open again.
+- **Offline is fine.** When the server can't be reached, the CLI queues changes and sends them at the next session start.
+- **History is kept.** Every change is appended to the task's history, which can't be edited.
+
+### Task lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> open: create_task
+    open --> claimed: claim_task
+    claimed --> claimed: add_note / renew lease
+    claimed --> open: release_task or lease expires
+    claimed --> done: complete_task (result)
+    claimed --> rejected: reject_task (reason)
+    open --> rejected: reject_task (reason)
+    open --> cancelled: sender cancels
+    claimed --> cancelled: sender cancels
+    done --> [*]
+    rejected --> [*]
+    cancelled --> [*]
+```
+
+### Connecting a machine or the Claude app
+
+Nobody copies a token between machines. You create a short one-time pairing code
+(in the web UI or with `token pair`), and the new machine or the Claude app trades it
+for its own credentials. Each connection gets its own token name, so you can revoke
+any one of them without affecting the others.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor You
+    participant UI as Web UI (LAN)
+    participant S as Server API
+    participant M as New machine
+    participant C as Claude app
+    You->>UI: Set up a machine: create code
+    UI-->>You: ABCD-2345 (single use, 10 minutes)
+    alt A machine with Claude Code
+        You->>M: agenttaskservice init --pair ABCD-2345
+        M->>S: POST /v1/pair
+        S-->>M: Its own token, saved in the keychain
+    else The Claude app
+        You->>C: Add custom connector (server URL + /mcp)
+        C->>S: Discover OAuth, register, start sign-in (PKCE)
+        S-->>You: Approval page: enter ABCD-2345
+        You->>S: Approve
+        S-->>C: Access and refresh tokens for this connection
+    end
+    Note over S: Every connection is a named token.<br/>token revoke NAME cuts it off.
+```
 
 ## Quick start
 
