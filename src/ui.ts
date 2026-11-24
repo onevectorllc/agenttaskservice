@@ -27,7 +27,7 @@ const SESSION_SECONDS = 12 * 3600;
 const STATUSES = ["open", "claimed", "done", "rejected", "cancelled"] as const;
 type Status = (typeof STATUSES)[number];
 
-const CSS = `
+export const CSS = `
 :root{--bg:#fafaf9;--fg:#1c1917;--muted:#57534e;--line:#e7e5e4;--card:#fff;--accent:#1d4ed8;--ok:#15803d;--warn:#b45309;--bad:#b91c1c}
 @media (prefers-color-scheme:dark){:root{--bg:#0c0a09;--fg:#f5f5f4;--muted:#a8a29e;--line:#292524;--card:#1c1917;--accent:#93c5fd;--ok:#86efac;--warn:#fcd34d;--bad:#fca5a5}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}

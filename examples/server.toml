@@ -4,6 +4,7 @@
 [server]
 host = "127.0.0.1"   # keep loopback behind a reverse proxy; a LAN address for standalone
 port = 7420
+# public_url = "https://tasks.example.com"   # turns on OAuth for the Claude app connector
 # trust_proxy = true   # behind a reverse proxy that sets X-Forwarded-For
 
 [tls]

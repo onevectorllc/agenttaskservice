@@ -89,6 +89,44 @@ const MIGRATIONS: string[] = [
     expires_at TEXT NOT NULL
   );
   `,
+  // 3: OAuth for the Claude app connector. Every secret is stored as a SHA-256 hash.
+  // Grants are bound to a token row (name + hash), so `token revoke` cuts the app off.
+  `
+  CREATE TABLE oauth_clients (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    redirect_uris TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    last_used_at  TEXT
+  );
+
+  CREATE TABLE oauth_codes (
+    hash           TEXT PRIMARY KEY,
+    client_id      TEXT NOT NULL,
+    redirect_uri   TEXT NOT NULL,
+    code_challenge TEXT NOT NULL,
+    token_name     TEXT NOT NULL,
+    token_hash     TEXT NOT NULL,
+    scope          TEXT NOT NULL,
+    expires_at     TEXT NOT NULL,
+    used_at        TEXT,
+    grant_id       TEXT NOT NULL
+  );
+
+  CREATE TABLE oauth_tokens (
+    hash       TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL CHECK (kind IN ('access', 'refresh')),
+    grant_id   TEXT NOT NULL,
+    client_id  TEXT NOT NULL,
+    token_name TEXT NOT NULL,
+    token_hash TEXT NOT NULL,
+    scope      TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at    TEXT
+  );
+  CREATE INDEX oauth_tokens_grant ON oauth_tokens (grant_id);
+  `,
 ];
 
 /** Open (and create or migrate) the database. Use ":memory:" in tests. */

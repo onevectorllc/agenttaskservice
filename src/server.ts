@@ -6,6 +6,7 @@ import https from "node:https";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Config } from "./config.js";
 import { createMcpServer } from "./mcp.js";
+import { createOAuthHandler, resourceMetadataUrl } from "./oauth.js";
 import { clientKey, FailureLimit } from "./ratelimit.js";
 import { PROJECT_ID, Store, TaskError } from "./store.js";
 import { createUiHandler } from "./ui.js";
@@ -60,10 +61,17 @@ export interface Handler {
   (req: IncomingMessage, res: ServerResponse): Promise<void>;
 }
 
-export function createHandler(store: Store, cfg: Pick<Config, "maxBodyBytes" | "trustProxy">, pairLimit = new FailureLimit()): Handler {
+export function createHandler(store: Store, cfg: Pick<Config, "maxBodyBytes" | "trustProxy" | "publicUrl">, pairLimit = new FailureLimit()): Handler {
+  // OAuth shares the pairing limit: the approval page also takes pairing codes.
+  const oauth = cfg.publicUrl ? createOAuthHandler(store, { publicUrl: cfg.publicUrl, trustProxy: cfg.trustProxy }, pairLimit) : undefined;
+  const challenge = cfg.publicUrl
+    ? `Bearer realm="agenttaskservice", resource_metadata="${resourceMetadataUrl(cfg.publicUrl)}"`
+    : 'Bearer realm="agenttaskservice"';
   return async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     try {
+      if (oauth && (await oauth(req, res, url))) return;
+
       if (url.pathname === "/health") {
         if (req.method !== "GET") return send(res, 405, { error: "method_not_allowed" });
         return send(res, 200, { status: "ok", service: "agenttaskservice" });
@@ -94,7 +102,7 @@ export function createHandler(store: Store, cfg: Pick<Config, "maxBodyBytes" | "
       const token = bearer(req);
       const actor = token ? store.authenticate(token) : undefined;
       if (!actor) {
-        res.setHeader("www-authenticate", 'Bearer realm="agenttaskservice"');
+        res.setHeader("www-authenticate", challenge);
         return send(res, 401, { error: "unauthorized", message: "A valid bearer token is required" });
       }
 

@@ -52,7 +52,7 @@ const RULES = [
     ok: (m) => /^(?:[a-z0-9-]+\.)*example\./i.test(m[0]),
   },
   { id: "private-key", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/g },
-  { id: "token", re: /\b(?:ats_[A-Za-z0-9_-]{30,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|sk-[A-Za-z0-9-]{30,}|AKIA[0-9A-Z]{16}|xox[abp]-[A-Za-z0-9-]{20,})/g },
+  { id: "token", re: /\b(?:at[sar]_[A-Za-z0-9_-]{30,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|sk-[A-Za-z0-9-]{30,}|AKIA[0-9A-Z]{16}|xox[abp]-[A-Za-z0-9-]{20,})/g },
 ];
 
 function denylist() {
