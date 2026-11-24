@@ -94,7 +94,7 @@ or `AGENTTASK_CONFIG`). See [`examples/server.toml`](examples/server.toml).
 | `storage.data_dir` | `AGENTTASK_DATA_DIR` | `~/.local/share/agenttaskservice` (Linux), `~/Library/Application Support/agenttaskservice` (macOS) |
 | `tasks.lease_hours` | `AGENTTASK_LEASE_HOURS` | `4` (max 720) |
 | `server.max_body_bytes` | | `1000000` |
-| `server.trust_proxy` | `AGENTTASK_TRUST_PROXY` | `false`; set it when a reverse proxy adds `X-Forwarded-For`, so rate limits apply per client |
+| `server.trust_proxy` | `AGENTTASK_TRUST_PROXY` | `false`; set it when a reverse proxy on the same host adds `X-Forwarded-For` (recommended behind a proxy), so rate limits apply per client |
 | `ui.enabled` | `AGENTTASK_UI_ENABLED` | `false` |
 | `ui.host`, `ui.port` | `AGENTTASK_UI_HOST`, `AGENTTASK_UI_PORT` | `127.0.0.1`, `7421` |
 | `ui.api_url` | `AGENTTASK_UI_API_URL` | unset; the API URL that the setup guide puts in its commands |

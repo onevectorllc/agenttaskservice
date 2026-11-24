@@ -49,13 +49,15 @@ export class FailureLimit {
 }
 
 /**
- * The client address to rate limit by. With trustProxy, the last X-Forwarded-For entry (the one the proxy added).
+ * The client address to rate limit by. With trustProxy and a loopback peer (a proxy on this host), the last
+ * X-Forwarded-For entry, which that proxy added.
  * Without it, a loopback peer is taken to be a reverse proxy shared by everyone, so it gets no key of its own:
  * one client's failures must not lock out every user.
  */
 export function clientKey(req: IncomingMessage, trustProxy = false): string | undefined {
   const peer = req.socket.remoteAddress ?? "";
-  if (trustProxy) {
+  // Only a proxy on this host may speak for the client: a direct caller could forge the header.
+  if (trustProxy && isLoopback(peer.replace(/^::ffff:/, ""))) {
     const fwd = String(req.headers["x-forwarded-for"] ?? "").split(",").map((s) => s.trim()).filter(Boolean).at(-1);
     if (fwd) return fwd;
   }
