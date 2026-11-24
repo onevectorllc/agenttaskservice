@@ -57,7 +57,7 @@ function authorizeUrl(clientId: string, challenge: string, extra: Record<string,
 }
 
 /** Load the approval page and post it, as a browser would. */
-async function approve(clientId: string, challenge: string, fields: Record<string, string>) {
+async function approve(clientId: string, challenge: string, fields: Record<string, string>, origin = "null") {
   const page = await fetch(authorizeUrl(clientId, challenge));
   const html = await page.text();
   const cookie = (page.headers.get("set-cookie") ?? "").split(";")[0];
@@ -65,7 +65,8 @@ async function approve(clientId: string, challenge: string, fields: Record<strin
   return fetch(`${base}/oauth/authorize`, {
     method: "POST",
     redirect: "manual",
-    headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+    // Browsers send "Origin: null" here because the page uses Referrer-Policy: no-referrer.
+    headers: { cookie, origin, "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ ...hidden, action: "approve", ...fields }).toString(),
   });
 }
@@ -218,6 +219,9 @@ describe("AC-27: approval page", () => {
     });
     expect(noCsrf.status).toBe(403);
     expect(store.listTokens().some((t) => t.name === "x1")).toBe(false);
+    const foreign = await approve(client.client_id, challenge, { pairing_code: store.createPairing("admin").code, name: "x2" }, "https://evil.example.com");
+    expect(foreign.status).toBe(403);
+    expect(store.listTokens().some((t) => t.name === "x2")).toBe(false);
     const deny = await approve(client.client_id, challenge, { action: "deny" });
     expect(new URL(deny.headers.get("location")!).searchParams.get("error")).toBe("access_denied");
   });

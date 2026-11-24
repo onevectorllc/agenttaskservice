@@ -352,8 +352,9 @@ export function createOAuthHandler(store: Store, opts: OAuthOptions, pairLimit: 
 
       const name = (posted.get("name") ?? "").trim();
       const expected = cookies(req)[COOKIE] ?? "";
+      // "Origin: null" comes from our own no-referrer pages; the CSRF cookie still protects those posts.
       const origin = req.headers.origin;
-      if (!expected || !sameValue(posted.get("csrf") ?? "", expected) || (origin && origin !== publicUrl && origin !== new URL(publicUrl).origin)) {
+      if (!expected || !sameValue(posted.get("csrf") ?? "", expected) || (origin && origin !== "null" && origin !== new URL(publicUrl).origin)) {
         show(403, name || suggestName(store, a.clientName), "This form expired. Try again.");
         return true;
       }
