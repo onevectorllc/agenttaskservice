@@ -10,7 +10,7 @@ import { runClient, sessionStart } from "../src/client/commands.js";
 import { saveClientConfig, stateDir, urlProblem } from "../src/client/config.js";
 import { runInit, shellQuote } from "../src/client/init.js";
 import { launchdPlist, systemdUnits, type WorkJob } from "../src/client/schedule.js";
-import { writeToken } from "../src/client/token.js";
+import { redact, writeToken } from "../src/client/token.js";
 import { claudeArgs, NEEDS_OWNER, runWork, waitsForOwner, workDirProblem, workPrompt } from "../src/client/work.js";
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
@@ -178,6 +178,20 @@ describe("token safety", () => {
     expect(c.text()).toContain("could not store the token with security (exit 36)");
     expect(c.text()).toContain("AGENTTASK_TOKEN_STORE=file");
     expect(c.text()).not.toContain(token);
+  });
+
+  it("a malformed token is refused without being shown, and redact() removes a token from text", async () => {
+    const bad = "ats_SECRETpart\ntail";
+    const c = capture();
+    expect(await runInit(["--url", base, "--yes"], c.out, { ...env, AGENTTASK_TOKEN: bad })).toBe(1);
+    expect(c.text()).toContain("malformed");
+    expect(c.text()).not.toContain("SECRETpart");
+    saveClientConfig({ url: base, tokenStore: "file" }, env);
+    writeFileSync(join(home, "config", "agenttaskservice", "token"), "ats_SECRETpart\u0000tail\n");
+    const hook = await sessionStart(home, env);
+    expect(hook).toContain("malformed");
+    expect(hook).not.toContain("SECRETpart");
+    expect(redact("failed: -w ats_abc123 here", "ats_abc123")).toBe("failed: -w [redacted] here");
   });
 
   it("quotes the hook command for the shell", () => {

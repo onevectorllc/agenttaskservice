@@ -69,3 +69,12 @@ export function writeToken(store_: TokenStore, token: string, env: Env = process
   writeFileSync(f, `${token}\n`, { mode: 0o600 });
   chmodSync(f, 0o600);
 }
+
+/** Printable ASCII with no spaces: what the server issues. Anything else is a paste mistake. */
+export const TOKEN_SHAPE = /^[\x21-\x7e]{8,512}$/;
+export const BAD_TOKEN = "the stored token is malformed (it must be one line of printable characters); run `agenttaskservice init` again";
+
+/** Remove a secret from text before it is shown or logged. */
+export function redact(text: string, secret: string | undefined): string {
+  return secret ? text.split(secret).join("[redacted]") : text;
+}

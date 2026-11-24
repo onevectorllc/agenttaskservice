@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { stateDir } from "./config.js";
+import { redact } from "./token.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -36,7 +37,7 @@ export async function getJson(conn: Conn, path: string): Promise<any> {
       signal: AbortSignal.timeout(conn.timeoutMs ?? 5000),
     });
   } catch (e) {
-    throw new Unreachable(e instanceof Error ? e.message : String(e));
+    throw new Unreachable(redact(e instanceof Error ? e.message : String(e), conn.token));
   }
   if (res.status >= 500) throw new Unreachable(`server error ${res.status}`);
   const body = await res.json().catch(() => ({}));
@@ -63,7 +64,7 @@ export async function callTool(conn: Conn, name: string, args: Record<string, un
     await client.connect(transport, { timeout: conn.timeoutMs ?? 10_000 });
     r = (await client.callTool({ name, arguments: args }, undefined, { timeout: conn.timeoutMs ?? 10_000 })) as typeof r;
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = redact(e instanceof Error ? e.message : String(e), conn.token);
     if (e instanceof McpError && e.code !== ErrorCode.RequestTimeout && e.code !== ErrorCode.ConnectionClosed) {
       throw new Refused(msg, "protocol");
     }

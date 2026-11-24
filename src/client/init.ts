@@ -12,7 +12,7 @@ import { Writable } from "node:stream";
 import { parseArgs } from "node:util";
 import { callTool, getJson, Refused } from "./api.js";
 import { clientConfigPath, expandHome, loadClientConfig, saveClientConfig, urlProblem, type ClientConfig } from "./config.js";
-import { defaultTokenStore, readToken, writeToken } from "./token.js";
+import { defaultTokenStore, readToken, redact, TOKEN_SHAPE, writeToken } from "./token.js";
 
 type Out = (s: string) => void;
 type Env = Record<string, string | undefined>;
@@ -182,6 +182,10 @@ export async function runInit(argv: string[], out: Out = console.log, env: Env =
     return 1;
   }
 
+  if (!TOKEN_SHAPE.test(token)) {
+    out("error: that token is malformed: it must be one line of printable characters, as `token add` printed it");
+    return 1;
+  }
   try {
     const health = await getJson({ url, token, timeoutMs: 5000 }, "/health");
     if (health.status !== "ok") throw new Error("unexpected /health reply");
@@ -306,7 +310,7 @@ export async function runInit(argv: string[], out: Out = console.log, env: Env =
       s.apply();
     } catch (e) {
       // Belt and braces: no step's error may echo the token.
-      out(`error: ${s.what} failed: ${(e as Error).message.split(token!).join("[redacted]")}`);
+      out(`error: ${s.what} failed: ${redact((e as Error).message, token)}`);
       return 1;
     }
   }
