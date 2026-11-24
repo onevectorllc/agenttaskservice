@@ -1,3 +1,4 @@
+// Copyright (c) 2026 OneVector LLC
 // SPDX-License-Identifier: MIT
 import { createHash, randomBytes } from "node:crypto";
 import type { DB } from "./db.js";

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 OneVector LLC
 name: ci
 
 on:
@@ -33,6 +34,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Every source file and doc starts with the copyright line
+        run: node scripts/check-headers.mjs
       - name: Scan tracked files and this PR's commits for personal or secret data
         env:
           # Optional repository secret: one private string per line (names, domains, hostnames).

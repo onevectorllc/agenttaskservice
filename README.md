@@ -1,3 +1,4 @@
+<!-- Copyright (c) 2026 OneVector LLC -->
 # agenttaskservice
 
 A small task service that lets AI agent projects hand TODOs to each other.

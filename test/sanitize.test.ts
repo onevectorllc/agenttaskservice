@@ -1,3 +1,4 @@
+// Copyright (c) 2026 OneVector LLC
 // SPDX-License-Identifier: MIT
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -74,5 +75,24 @@ describe("AC-9: sanitize check", () => {
     const text = readFileSync(join(__dirname, "..", "LICENSE"), "utf8");
     expect(text).toMatch(/^MIT License/);
     expect(text).toContain(`Copyright (c) 2026 ${"One" + "Vector"} LLC`);
+  });
+
+  it("the copyright line may name the company; the same name elsewhere is still flagged", () => {
+    const name = ["One", "Vector"].join("");
+    const license = `MIT License\n\nCopyright (c) 2026 ${name} LLC\n`;
+    const d = repo({ LICENSE: license, "a.ts": `// Copyright (c) 2026 ${name} LLC\nconst x = 1;\n` });
+    expect(check(d, { SANITIZE_DENYLIST: name }).code).toBe(0);
+    const e = repo({ LICENSE: license, "a.ts": `// Copyright (c) 2026 ${name} LLC\n// built by ${name}\n` });
+    expect(check(e, { SANITIZE_DENYLIST: name }).code).toBe(1);
+  });
+
+  it("check-headers fails on a source file without the copyright line", () => {
+    const headers = join(__dirname, "..", "scripts", "check-headers.mjs");
+    const run = (d: string) => spawnSync("node", [headers, "--root", d]).status;
+    const name = ["One", "Vector"].join("");
+    const license = `MIT License\n\nCopyright (c) 2026 ${name} LLC\n`;
+    expect(run(repo({ LICENSE: license, "a.ts": `// Copyright (c) 2026 ${name} LLC\n`, "data.json": "{}" }))).toBe(0);
+    expect(run(repo({ LICENSE: license, "a.ts": "const x = 1;\n" }))).toBe(1);
+    expect(run(repo({ LICENSE: license, "a.ts": "// Copyright (c) 2026 Someone Else\n" }))).toBe(1);
   });
 });
