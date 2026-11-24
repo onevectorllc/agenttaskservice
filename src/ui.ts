@@ -138,9 +138,14 @@ function postAllowed(req: IncomingMessage, form: URLSearchParams, csrf: string):
   return sameOrigin(req) && csrf !== "" && sameValue(form.get("csrf") ?? "", csrf);
 }
 
+/**
+ * Refuse cross-site posts that name their origin. Browsers send "Origin: null" for form posts from pages
+ * served with Referrer-Policy: no-referrer (as ours are), so "null" is treated like no Origin: the CSRF
+ * value and the SameSite=Strict cookies still protect those posts.
+ */
 function sameOrigin(req: IncomingMessage): boolean {
   const origin = req.headers.origin;
-  if (!origin) return true;
+  if (!origin || origin === "null") return true;
   try {
     return new URL(origin).host === req.headers.host;
   } catch {

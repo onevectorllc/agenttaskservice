@@ -136,6 +136,20 @@ describe("AC-20: sign-in", () => {
     expect((await postLogin(admin, uiBase, { origin: "http://evil.example.com" })).status).toBe(403);
   });
 
+  it("AC-20: a browser's \"Origin: null\" (sent because pages use no-referrer) still signs in and posts forms", async () => {
+    const r = await postLogin(admin, uiBase, { origin: "null" });
+    expect(r.status).toBe(303);
+    const cookie = r.headers.getSetCookie().find((c) => c.startsWith("ats_ui="))!.split(";")[0];
+    const csrf = csrfOf((await get("/ui/setup", cookie)).text);
+    const pair = await fetch(`${uiBase}/ui/setup/pair`, {
+      method: "POST",
+      headers: { cookie, origin: "null", "content-type": "application/x-www-form-urlencoded" },
+      body: form({ csrf, name: "null-origin" }),
+    });
+    expect(pair.status).toBe(200);
+    expect(await pair.text()).toContain('class="code"');
+  });
+
   it("AC-20: failed sign-ins are rate limited", async () => {
     const srv = startUi(new Store(openDb(":memory:")), cfg) as Server;
     const base = await up(srv);
