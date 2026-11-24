@@ -169,7 +169,10 @@ once with a pairing code. No password is stored anywhere.
 Details: authorization code with PKCE (S256) only, public clients only, redirect
 URIs must be https (or http on localhost) and match exactly. Access tokens last an
 hour; refresh tokens last 30 days and rotate on each use, and reusing an old one
-ends the connection. Codes and tokens are stored hashed. Wrong pairing codes on the
+ends the connection. Codes and tokens are stored hashed. Since anyone can register a
+client, a bad authorization request shows an error page on the server instead of
+redirecting back to the client with `error` (RFC 6749 4.1.2.1), so the server can't be
+used as an open redirector. Wrong pairing codes on the
 approval page count toward the same rate limit as `POST /v1/pair`.
 
 ## Client setup
