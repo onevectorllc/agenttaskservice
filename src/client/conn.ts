@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 import type { Conn } from "./api.js";
 import { loadClientConfig, urlProblem } from "./config.js";
-import { readToken } from "./token.js";
+import { BAD_TOKEN, readToken, TOKEN_SHAPE } from "./token.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -16,5 +16,6 @@ export function connect(env: Env = process.env, timeoutMs?: number): Conn | unde
   if (problem) throw new Error(problem);
   const token = readToken(cfg.tokenStore, env);
   if (!token) return undefined;
+  if (!TOKEN_SHAPE.test(token)) throw new Error(BAD_TOKEN);
   return { url: cfg.url, token, timeoutMs };
 }
