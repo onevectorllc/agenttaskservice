@@ -96,6 +96,8 @@ export function redirectUriProblem(uri: unknown): string | undefined {
     return `Not a URL: ${uri}`;
   }
   if (u.hash || uri.includes("#")) return "redirect URIs can't have a fragment";
+  // Hosts go into a CSP header (form-action), so allow only plain DNS names and IP literals.
+  if (!/^(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*|\[[0-9A-Fa-f:.]+\])$/.test(u.hostname)) return "redirect URI host must be a plain DNS name or IP address";
   if (u.protocol === "https:") return undefined;
   if (u.protocol === "http:" && isLoopback(u.hostname.replace(/^\[|\]$/g, ""))) return undefined;
   return "redirect URIs must use https (or http on localhost)";
@@ -110,19 +112,18 @@ interface AuthRequest {
   scope: string;
 }
 
-/** Validate an authorization request. `fatal` errors show a page; others go back to the client's redirect URI. */
-function parseAuthRequest(
-  store: Store,
-  p: URLSearchParams,
-  publicUrl: string,
-): { ok: AuthRequest } | { fatal: string } | { redirect: string; error: string; description: string; state?: string } {
+/**
+ * Validate an authorization request. Every error shows a page on this server: registration is open, so
+ * redirecting errors to a client's URI would make this host an open redirector (RFC 9700 4.11.2).
+ */
+function parseAuthRequest(store: Store, p: URLSearchParams, publicUrl: string): { ok: AuthRequest } | { fatal: string } {
   const client = store.getClient(p.get("client_id") ?? "");
   if (!client) return { fatal: "This app is not registered with the server. Remove the connector and add it again." };
   let redirectUri = p.get("redirect_uri") ?? "";
   if (!redirectUri && client.redirect_uris.length === 1) redirectUri = client.redirect_uris[0];
   if (!client.redirect_uris.includes(redirectUri)) return { fatal: "The redirect address doesn't match the one this app registered." };
   const state = p.get("state") ?? undefined;
-  const back = (error: string, description: string) => ({ redirect: redirectUri, error, description, state });
+  const back = (_error: string, description: string) => ({ fatal: `The app sent an invalid request: ${description}.` });
   if (p.get("response_type") !== "code") return back("unsupported_response_type", "Only response_type=code is supported");
   const challenge = p.get("code_challenge") ?? "";
   if (!CHALLENGE.test(challenge)) return back("invalid_request", "PKCE code_challenge is required");
@@ -167,13 +168,14 @@ function approvalPage(a: AuthRequest, csrf: string, name: string, error?: string
     .join("");
   return `<h1>Connect ${h(a.clientName)}?</h1>
 <div class="card"><p><b>${h(a.clientName)}</b> wants to read and change your cross-project tasks. After you approve, you go back to <b>${h(host)}</b>.</p>
-<p class="muted">Only approve if you started this from that app just now.</p></div>
+<p class="muted">Only approve if you started this from that app just now.</p>
+${/(^|\.)claude\.(ai|com)$/i.test(new URL(a.redirectUri).hostname) ? "" : `<p class="err">Note: ${h(host)} is not a Claude address. Approve only if you trust it.</p>`}</div>
 ${error ? `<p class="err">${h(error)}</p>` : ""}
 <form method="post" action="/oauth/authorize">${fields}
 <p><label>Pairing code<br><input name="pairing_code" required autocomplete="one-time-code" placeholder="ABCD-2345" maxlength="12"></label></p>
 <p class="muted">Create one in the web UI on your local network (Set up a machine), or run <code>agenttaskservice token pair</code> on the server.</p>
 <p><label>Name for this connection<br><input name="name" value="${h(name)}" pattern="[A-Za-z0-9._-]{1,64}" maxlength="64" required></label></p>
-<p class="muted">It shows in <code>token list</code>; <code>token revoke ${h(name)}</code> disconnects the app.</p>
+<p class="muted">It shows in <code>token list</code>; <code>token revoke &lt;name&gt;</code> disconnects the app.</p>
 <p><button class="primary" name="action" value="approve">Approve</button> <button name="action" value="deny">Deny</button></p></form>`;
 }
 
@@ -302,7 +304,7 @@ export function createOAuthHandler(store: Store, opts: OAuthOptions, pairLimit: 
         }
         const grant = form.get("grant_type");
         if (grant === "authorization_code") {
-          json(res, 200, store.exchangeCode(form.get("code") ?? "", clientId, form.get("redirect_uri") ?? "", form.get("code_verifier") ?? ""));
+          json(res, 200, store.exchangeCode(form.get("code") ?? "", clientId, form.get("redirect_uri") || undefined, form.get("code_verifier") ?? ""));
         } else if (grant === "refresh_token") {
           json(res, 200, store.refreshTokens(form.get("refresh_token") ?? "", clientId));
         } else {
@@ -333,10 +335,6 @@ export function createOAuthHandler(store: Store, opts: OAuthOptions, pairLimit: 
       const parsed = parseAuthRequest(store, params, publicUrl);
       if ("fatal" in parsed) {
         page(res, 400, "Can't connect", `<h1>Can't connect</h1><p class="err">${h(parsed.fatal)}</p>`);
-        return true;
-      }
-      if ("redirect" in parsed) {
-        backTo(res, parsed.redirect, { error: parsed.error, error_description: parsed.description, state: parsed.state, iss: publicUrl });
         return true;
       }
       const a = parsed.ok;

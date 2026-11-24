@@ -420,13 +420,14 @@ export class Store {
   }
 
   /** Exchange a pairing code for a new token. The code works once, before it expires. */
-  redeemPairing(code: string, name?: string): { name: string; token: string } {
+  redeemPairing(code: string, name?: string, preferGiven = false): { name: string; token: string } {
     return this.db.transaction(() => {
       const row = this.db.prepare("SELECT name, expires_at, used_at FROM pairings WHERE hash = ?").get(Store.hashToken(normalisePairingCode(code))) as
         | { name: string | null; expires_at: string; used_at: string | null }
         | undefined;
       if (!row || row.used_at || row.expires_at <= this.iso()) throw new TaskError("forbidden", "Invalid or expired pairing code");
-      const tokenName = row.name ?? name;
+      // A machine pairing uses the name chosen when the code was made; the OAuth page asks for one and prefers it.
+      const tokenName = preferGiven ? (name ?? row.name ?? undefined) : (row.name ?? name);
       if (!tokenName) throw new TaskError("invalid", "Give the new token a name");
       const token = this.addToken(tokenName);
       this.db
@@ -506,7 +507,7 @@ export class Store {
     scope: string;
   }): { code: string; name: string } {
     return this.db.transaction(() => {
-      const { name, token } = this.redeemPairing(input.pairingCode, input.name);
+      const { name, token } = this.redeemPairing(input.pairingCode, input.name, true);
       const code = randomBytes(32).toString("base64url");
       this.db
         .prepare(
@@ -529,13 +530,16 @@ export class Store {
   }
 
   /** authorization_code grant with PKCE (S256). A code works once; replaying it revokes what it issued. */
-  exchangeCode(code: string, clientId: string, redirectUri: string, verifier: string): OAuthTokens {
+  /** `redirectUri` may be omitted only if the authorization request omitted it (a client with a single registered URI). */
+  exchangeCode(code: string, clientId: string, redirectUri: string | undefined, verifier: string): OAuthTokens {
     return this.grantStep(() => {
       const row = this.db.prepare("SELECT * FROM oauth_codes WHERE hash = ?").get(Store.hashToken(code)) as CodeRow | undefined;
       if (!row) throw new OAuthError("invalid_grant", "Unknown authorization code");
       if (row.used_at) throw new GrantReuse(row.grant_id, "Authorization code already used");
       if (row.expires_at <= this.iso()) throw new OAuthError("invalid_grant", "Authorization code expired");
-      if (row.client_id !== clientId || row.redirect_uri !== redirectUri) throw new OAuthError("invalid_grant", "Code was issued to another client or redirect URI");
+      const uris = this.getClient(clientId)?.redirect_uris ?? [];
+      const sameRedirect = redirectUri ? row.redirect_uri === redirectUri : uris.length === 1 && uris[0] === row.redirect_uri;
+      if (row.client_id !== clientId || !sameRedirect) throw new OAuthError("invalid_grant", "Code was issued to another client or redirect URI");
       if (!/^[A-Za-z0-9._~-]{43,128}$/.test(verifier) || !sameString(s256(verifier), row.code_challenge)) {
         throw new OAuthError("invalid_grant", "PKCE verification failed");
       }
@@ -565,7 +569,7 @@ export class Store {
       return this.db.transaction(fn)();
     } catch (e) {
       if (!(e instanceof GrantReuse)) throw e;
-      this.db.prepare("DELETE FROM oauth_tokens WHERE grant_id = ?").run(e.grantId);
+      this.endGrant(e.grantId);
       throw new OAuthError("invalid_grant", e.message);
     }
   }
@@ -573,7 +577,21 @@ export class Store {
   /** RFC 7009: revoking either token ends the whole grant. Unknown tokens are not an error. */
   revokeOAuthToken(token: string): void {
     const row = this.db.prepare("SELECT grant_id FROM oauth_tokens WHERE hash = ?").get(Store.hashToken(token)) as { grant_id: string } | undefined;
-    if (row) this.db.prepare("DELETE FROM oauth_tokens WHERE grant_id = ?").run(row.grant_id);
+    if (row) this.endGrant(row.grant_id);
+  }
+
+  /** End a grant: delete its OAuth tokens and revoke the connection's token row, so `token list` shows it as gone. */
+  private endGrant(grantId: string): void {
+    this.db.transaction(() => {
+      const g = (this.db.prepare("SELECT token_name, token_hash FROM oauth_tokens WHERE grant_id = ? LIMIT 1").get(grantId) ??
+        this.db.prepare("SELECT token_name, token_hash FROM oauth_codes WHERE grant_id = ? LIMIT 1").get(grantId)) as
+        | { token_name: string; token_hash: string }
+        | undefined;
+      this.db.prepare("DELETE FROM oauth_tokens WHERE grant_id = ?").run(grantId);
+      if (g && this.db.prepare("SELECT 1 FROM tokens WHERE name = ? AND hash = ? AND revoked_at IS NULL").get(g.token_name, g.token_hash)) {
+        this.revokeToken(g.token_name);
+      }
+    })();
   }
 
   private issueTokens(g: { grant_id: string; client_id: string; token_name: string; token_hash: string; scope: string }): OAuthTokens {

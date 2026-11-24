@@ -3,13 +3,14 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createHash, randomBytes } from "node:crypto";
-import type { Server } from "node:http";
+import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
 import { openDb } from "../src/db.js";
 import { redirectUriProblem } from "../src/oauth.js";
-import { startServer } from "../src/server.js";
+import { FailureLimit } from "../src/ratelimit.js";
+import { createHandler, startServer } from "../src/server.js";
 import { OAuthError, Store } from "../src/store.js";
 
 let store: Store;
@@ -194,15 +195,65 @@ describe("AC-27: approval page", () => {
     expect(other.headers.get("location")).toBeNull();
   });
 
-  it("AC-27: protocol errors go back to the client with state", async () => {
+  it("AC-27: protocol errors show a page here instead of redirecting (no open redirect)", async () => {
     const { body: client } = await register();
-    const r = await fetch(authorizeUrl(client.client_id, pkce().challenge, { code_challenge_method: "plain" }), { redirect: "manual" });
+    for (const extra of [{ code_challenge_method: "plain" }, { response_type: "token" }, { resource: "https://other.example.com/mcp" }]) {
+      const r = await fetch(authorizeUrl(client.client_id, pkce().challenge, extra), { redirect: "manual" });
+      expect(r.status).toBe(400);
+      expect(r.headers.get("location")).toBeNull();
+    }
+  });
+
+  it("AC-27: redirect hosts that could break the CSP header are refused at registration", async () => {
+    expect((await register(["https://x.example.com;sandbox/cb"])).status).toBe(400);
+    expect((await register(["https://x.example.com,evil/cb"])).status).toBe(400);
+    expect((await register(["https://[::1]/cb"])).status).toBe(201);
+  });
+
+  it("AC-27: warns when the app does not return to a Claude address", async () => {
+    const other = await (await fetch(authorizeUrl((await register()).body.client_id, pkce().challenge))).text();
+    expect(other).toContain("is not a Claude address");
+    const c = await register(["https://claude.ai/api/mcp/auth_callback"]);
+    const p = new URLSearchParams({ response_type: "code", client_id: c.body.client_id, redirect_uri: "https://claude.ai/api/mcp/auth_callback", code_challenge: pkce().challenge, code_challenge_method: "S256" });
+    expect(await (await fetch(`${base}/oauth/authorize?${p}`)).text()).not.toContain("is not a Claude address");
+  });
+
+  it("AC-27: wrong codes on the approval page share the /v1/pair rate limit", async () => {
+    const s = new Store(openDb(":memory:"));
+    const lim = new FailureLimit(10, 3);
+    const srv = createServer((req, res) => void createHandler(s, { maxBodyBytes: 1e5, publicUrl: base }, lim)(req, res)).listen(0, "127.0.0.1");
+    await new Promise<void>((r) => srv.once("listening", () => r()));
+    const b = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+    try {
+      const { client_id } = s.registerClient("x", [REDIRECT]);
+      const challenge = pkce().challenge;
+      const post = async () => {
+        const page = await fetch(`${b}/oauth/authorize?${new URLSearchParams({ response_type: "code", client_id, redirect_uri: REDIRECT, code_challenge: challenge, code_challenge_method: "S256" })}`);
+        const csrf = /name="csrf" value="([^"]+)"/.exec(await page.text())![1];
+        return fetch(`${b}/oauth/authorize`, {
+          method: "POST",
+          headers: { cookie: (page.headers.get("set-cookie") ?? "").split(";")[0], "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ client_id, redirect_uri: REDIRECT, response_type: "code", code_challenge: challenge, code_challenge_method: "S256", csrf, pairing_code: "ZZZZ-ZZZZ", name: "n", action: "approve" }).toString(),
+        });
+      };
+      for (let i = 0; i < 3; i++) expect((await post()).status).toBe(403);
+      expect((await post()).status).toBe(429);
+      expect((await fetch(`${b}/v1/pair`, { method: "POST", body: JSON.stringify({ code: "ZZZZ-ZZZZ" }) })).status).toBe(429);
+    } finally {
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+
+  it("AC-27: the name typed on the page wins over a pairing code's name", async () => {
+    const { body: client } = await register();
+    const { verifier, challenge } = pkce();
+    const r = await approve(client.client_id, challenge, { pairing_code: store.createPairing("admin", { name: "machine-name" }).code, name: "typed-name" });
     expect(r.status).toBe(303);
-    const loc = new URL(r.headers.get("location")!);
-    expect(loc.searchParams.get("error")).toBe("invalid_request");
-    expect(loc.searchParams.get("state")).toBe("st-1");
-    const t = await fetch(authorizeUrl(client.client_id, pkce().challenge, { resource: "https://other.example.com/mcp" }), { redirect: "manual" });
-    expect(new URL(t.headers.get("location")!).searchParams.get("error")).toBe("invalid_target");
+    expect(store.listTokens().some((t) => t.name === "typed-name" && !t.revoked_at)).toBe(true);
+    expect(store.listTokens().some((t) => t.name === "machine-name")).toBe(false);
+    // A single-URI client may leave redirect_uri out of the token request when it left it out of authorize.
+    const code = new URL(r.headers.get("location")!).searchParams.get("code")!;
+    expect((await token({ grant_type: "authorization_code", code, client_id: client.client_id, code_verifier: verifier })).status).toBe(200);
   });
 
   it("AC-27: a wrong pairing code or a missing CSRF value is refused; deny returns access_denied", async () => {
@@ -249,6 +300,7 @@ describe("AC-26: tokens", () => {
     const again = await token({ ...base_, code_verifier: verifier });
     expect(again.body.error).toBe("invalid_grant");
     expect(await mcpWorks(good.body.access_token)).toBe(false);
+    expect(store.listTokens().find((t) => t.name === "replay")?.revoked_at).toBeTruthy();
     expect((await token({ ...base_, client_id: "atc_nope", code_verifier: verifier })).status).toBe(401);
   });
 
@@ -269,6 +321,7 @@ describe("AC-26: tokens", () => {
     const r = await fetch(`${base}/oauth/revoke`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token: a.tokens.refresh_token }).toString() });
     expect(r.status).toBe(200);
     expect(await mcpWorks(a.tokens.access_token)).toBe(false);
+    expect(store.listTokens().find((t) => t.name === "revoke-me")?.revoked_at).toBeTruthy();
 
     const b = await connect("cut-off");
     store.revokeToken("cut-off");
