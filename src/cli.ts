@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Copyright (c) 2026 OneVector LLC
 // SPDX-License-Identifier: MIT
 import { closeSync, openSync, realpathSync, writeSync } from "node:fs";
 import type { Server } from "node:net";

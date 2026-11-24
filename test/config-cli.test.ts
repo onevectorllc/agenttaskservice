@@ -1,3 +1,4 @@
+// Copyright (c) 2026 OneVector LLC
 // SPDX-License-Identifier: MIT
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";

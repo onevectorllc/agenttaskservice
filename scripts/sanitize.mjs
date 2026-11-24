@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Copyright (c) 2026 OneVector LLC
 // SPDX-License-Identifier: MIT
 //
 // Fails when tracked files (or commit authors) contain personal or secret data:
@@ -23,6 +24,15 @@ const commitRange = opt("--commits");
 
 /** Files that may carry names by the owner's choice. */
 const ALLOWED_NAME_FILES = new Set(["LICENSE"]);
+// The copyright notice every file starts with names the holder from LICENSE ("Copyright (c) <year> <holder>").
+// That exact line may contain a denylisted name; nothing else on it is allowed.
+function copyrightLine() {
+  const f = join(root, "LICENSE");
+  const m = existsSync(f) && /^Copyright \(c\) \d{4} (.+?)\s*$/m.exec(readFileSync(f, "utf8"));
+  if (!m) return /(?!)/;
+  const holder = m[1].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\s*(?://|#|<!--)?\\s*Copyright \\(c\\) \\d{4} ${holder}\\s*(?:-->)?\\s*$`);
+}
 const SKIP_FILES = new Set(["package-lock.json"]);
 
 const PLACEHOLDER_USERS = new Set(["alice", "bob", "you", "user", "example", "runner", "node"]);
@@ -53,7 +63,7 @@ function denylist() {
   return lines.map((s) => s.trim()).filter((s) => s && !s.startsWith("#"));
 }
 
-function scanText(text, file, deny, findings) {
+function scanText(text, file, deny, findings, copyright = /(?!)/) {
   const lines = text.split(/\r?\n/);
   lines.forEach((line, i) => {
     for (const rule of RULES) {
@@ -62,7 +72,7 @@ function scanText(text, file, deny, findings) {
         findings.push(`${file}:${i + 1}: ${rule.id}`);
       }
     }
-    if (!ALLOWED_NAME_FILES.has(file)) {
+    if (!ALLOWED_NAME_FILES.has(file) && !copyright.test(line)) {
       const lower = line.toLowerCase();
       for (const d of deny) if (lower.includes(d.toLowerCase())) findings.push(`${file}:${i + 1}: denylisted string`);
     }
@@ -71,13 +81,14 @@ function scanText(text, file, deny, findings) {
 
 export function sanitize() {
   const deny = denylist();
+  const copyright = copyrightLine();
   const findings = [];
   const files = execFileSync("git", ["ls-files", "-z"], { cwd: root }).toString().split("\0").filter(Boolean);
   for (const file of files) {
     if (SKIP_FILES.has(file)) continue;
     const buf = readFileSync(join(root, file));
     if (buf.includes(0)) continue; // binary
-    scanText(buf.toString("utf8"), file, deny, findings);
+    scanText(buf.toString("utf8"), file, deny, findings, copyright);
   }
   if (commitRange) {
     const log = execFileSync("git", ["log", "--format=%an <%ae>%n%cn <%ce>%n%B", commitRange], { cwd: root }).toString();

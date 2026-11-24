@@ -1,3 +1,4 @@
+// Copyright (c) 2026 OneVector LLC
 // SPDX-License-Identifier: MIT
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";

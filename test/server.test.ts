@@ -1,3 +1,4 @@
+// Copyright (c) 2026 OneVector LLC
 // SPDX-License-Identifier: MIT
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";

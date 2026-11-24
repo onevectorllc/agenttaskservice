@@ -1,3 +1,4 @@
+// Copyright (c) 2026 OneVector LLC
 // SPDX-License-Identifier: MIT
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";

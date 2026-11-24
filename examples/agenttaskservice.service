@@ -1,3 +1,4 @@
+# Copyright (c) 2026 OneVector LLC
 # systemd user unit. Install a pinned version first:
 #   npm install -g agenttaskservice@<version>
 # then:

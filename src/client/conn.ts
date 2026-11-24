@@ -1,3 +1,4 @@
+// Copyright (c) 2026 OneVector LLC
 // SPDX-License-Identifier: MIT
 import type { Conn } from "./api.js";
 import { loadClientConfig, urlProblem } from "./config.js";

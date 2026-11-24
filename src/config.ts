@@ -1,3 +1,4 @@
+// Copyright (c) 2026 OneVector LLC
 // SPDX-License-Identifier: MIT
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";

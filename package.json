@@ -21,7 +21,8 @@
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "sanitize": "node scripts/sanitize.mjs",
-    "check": "npm run typecheck && npm test && npm run sanitize"
+    "check": "npm run typecheck && npm test && npm run sanitize && npm run headers",
+    "headers": "node scripts/check-headers.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

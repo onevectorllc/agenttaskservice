@@ -1,3 +1,4 @@
+// Copyright (c) 2026 OneVector LLC
 // SPDX-License-Identifier: MIT
 import { beforeEach, describe, expect, it } from "vitest";
 import { openDb } from "../src/db.js";
