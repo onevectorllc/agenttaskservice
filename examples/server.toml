@@ -4,6 +4,7 @@
 [server]
 host = "127.0.0.1"   # keep loopback behind a reverse proxy; a LAN address for standalone
 port = 7420
+# trust_proxy = true   # behind a reverse proxy that sets X-Forwarded-For
 
 [tls]
 # Set both to serve HTTPS directly (standalone mode).
@@ -15,3 +16,11 @@ port = 7420
 
 [tasks]
 lease_hours = 4
+
+[ui]
+# The web UI runs on its own port. Keep it on your local network: never route this port publicly.
+# enabled = true
+# host = "<the server's LAN address>"   # 0.0.0.0 works too, but serve then warns
+# port = 7421
+# api_url = "https://tasks.example.com"   # shown in the setup guide's commands
+# repo_url = "https://github.com/<owner>/agenttaskservice"   # the setup guide's git clone URL

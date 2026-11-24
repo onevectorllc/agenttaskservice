@@ -8,17 +8,18 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { CLIENT_USAGE, runClient } from "./client/commands.js";
 import { runInit } from "./client/init.js";
-import { isLoopback, loadConfig } from "./config.js";
+import { isLoopback, isPrivateAddress, loadConfig } from "./config.js";
 import { openDb } from "./db.js";
-import { startServer } from "./server.js";
+import { startServer, startUi } from "./server.js";
 import { Store, TaskError } from "./store.js";
 
 const USAGE = `agenttaskservice <command>
 
 Server commands:
-  serve                         Start the server
+  serve                         Start the server (and the web UI when [ui] is enabled)
   token add <name>              Create a client token (shown once)
-  token list                    List tokens
+  token pair [--name N]         Create a one-time pairing code for a new machine (10 minutes)
+  token list                    List tokens with last-used time
   token revoke <name>           Revoke a token
   project add <id> [--name N] [--description D] [--alias A ...]
   project list                  List projects
@@ -44,6 +45,8 @@ export async function main(argv: string[], out: (s: string) => void = console.lo
 export interface RunHooks {
   /** Called with the listening server after `serve` starts (used by tests). */
   onServer?: (server: Server) => void;
+  /** Called with the web UI server when it starts (used by tests). */
+  onUi?: (server: Server) => void;
 }
 
 export function run(argv: string[], out: (s: string) => void = console.log, hooks: RunHooks = {}): number {
@@ -73,7 +76,15 @@ export function run(argv: string[], out: (s: string) => void = console.log, hook
         // Never print the token: service managers keep stdout in their logs.
         const file = join(cfg.dataDir, "admin-token");
         // "wx": never follow or overwrite an existing file or symlink.
-        const fd = openSync(file, "wx", 0o600);
+        let fd: number;
+        try {
+          fd = openSync(file, "wx", 0o600);
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+          out(`error: no active tokens, and an old admin token file is in the way: ${file}`);
+          out("Its token no longer works. Delete that file and run serve again to create a new admin token.");
+          return 1;
+        }
         try {
           writeSync(fd, `${store.addToken("admin")}\n`);
         } finally {
@@ -88,14 +99,31 @@ export function run(argv: string[], out: (s: string) => void = console.log, hook
       const server = startServer(store, cfg);
       hooks.onServer?.(server);
       out(`agenttaskservice listening on ${cfg.tlsCert ? "https" : "http"}://${cfg.host}:${cfg.port} (data: ${cfg.dataDir})`);
+      if (cfg.ui) {
+        if (!isPrivateAddress(cfg.ui.host)) {
+          console.warn(`warning: the web UI listens on ${cfg.ui.host}, which is not a loopback or private address. Keep it on your local network.`);
+        }
+        const ui = startUi(store, cfg)!;
+        hooks.onUi?.(ui);
+        out(`web UI on ${cfg.tlsCert ? "https" : "http"}://${cfg.ui.host}:${cfg.ui.port}/ui/ (keep this port off any public route)`);
+      }
       return 0;
     }
     if (cmd === "token" && sub === "add" && arg) {
       out(store.addToken(arg));
       return 0;
     }
+    if (cmd === "token" && sub === "pair") {
+      const p = store.createPairing("cli", { name: values.name });
+      out(`Pairing code: ${p.code} (single use, valid until ${p.expires_at})`);
+      out(`On the new machine: agenttaskservice init --url <server URL> --pair ${p.code}${values.name ? "" : " --name <machine>"}`);
+      return 0;
+    }
     if (cmd === "token" && sub === "list") {
-      for (const t of store.listTokens()) out(`${t.name}\tcreated ${t.created_at}${t.revoked_at ? `\trevoked ${t.revoked_at}` : ""}`);
+      for (const t of store.listTokens()) {
+        const state = t.revoked_at ? `revoked ${t.revoked_at}` : `last used ${t.last_used_at ?? "never"}`;
+        out(`${t.name}\tcreated ${t.created_at}\t${state}`);
+      }
       return 0;
     }
     if (cmd === "token" && sub === "revoke" && arg) {

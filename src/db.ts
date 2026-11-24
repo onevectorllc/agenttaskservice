@@ -66,6 +66,29 @@ const MIGRATIONS: string[] = [
     revoked_at TEXT
   );
   `,
+  // 2: last-seen time per token, one-time pairing codes, web UI sessions
+  `
+  ALTER TABLE tokens ADD COLUMN last_used_at TEXT;
+
+  CREATE TABLE pairings (
+    hash       TEXT PRIMARY KEY,
+    name       TEXT,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at    TEXT,
+    used_for   TEXT
+  );
+
+  CREATE TABLE ui_sessions (
+    hash       TEXT PRIMARY KEY,
+    token_name TEXT NOT NULL,
+    token_hash TEXT NOT NULL,
+    csrf       TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  );
+  `,
 ];
 
 /** Open (and create or migrate) the database. Use ":memory:" in tests. */

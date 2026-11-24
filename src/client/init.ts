@@ -11,7 +11,7 @@ import { workDirProblem } from "./work.js";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { parseArgs } from "node:util";
-import { callTool, getJson, Refused } from "./api.js";
+import { callTool, getJson, redeemPairCode, Refused } from "./api.js";
 import { clientConfigPath, expandHome, loadClientConfig, saveClientConfig, urlProblem, type ClientConfig } from "./config.js";
 import { defaultTokenStore, readToken, redact, TOKEN_SHAPE, writeToken } from "./token.js";
 
@@ -125,7 +125,7 @@ async function ask(question: string, hidden = false): Promise<string> {
 
 interface Step {
   what: string;
-  apply: () => void;
+  apply: () => void | Promise<void>;
 }
 
 export async function runInit(argv: string[], out: Out = console.log, env: Env = process.env): Promise<number> {
@@ -135,6 +135,8 @@ export async function runInit(argv: string[], out: Out = console.log, env: Env =
     options: {
       url: { type: "string" },
       token: { type: "string" },
+      pair: { type: "string" },
+      name: { type: "string" },
       "workspace-root": { type: "string" },
       watch: { type: "string", multiple: true },
       insecure: { type: "boolean" },
@@ -176,26 +178,47 @@ export async function runInit(argv: string[], out: Out = console.log, env: Env =
   }
 
   const store = env.AGENTTASK_TOKEN_STORE || existsSync(clientConfigPath(env)) ? current.tokenStore : defaultTokenStore();
-  let token = values.token ?? env.AGENTTASK_TOKEN ?? readToken(store, env);
-  if (!token && interactive) token = await ask("Token (from `agenttaskservice token add <name>` on the server; not shown): ", true);
-  if (!token) {
-    out("error: give the token in AGENTTASK_TOKEN (or --token, which your shell history keeps)");
+  const pair = values.pair?.trim();
+  if (pair !== undefined) {
+    if (values.token) {
+      out("error: use --pair or --token, not both");
+      return 1;
+    }
+    if (!/^[A-Za-z0-9]{4}-?[A-Za-z0-9]{4}$/.test(pair)) {
+      out("error: a pairing code looks like ABCD-2345 (create one in the web UI or with `agenttaskservice token pair`)");
+      return 1;
+    }
+    if (values.name !== undefined && !/^[A-Za-z0-9._-]{1,64}$/.test(values.name)) {
+      out("error: --name: letters, digits, . _ - (max 64)");
+      return 1;
+    }
+  } else if (values.name !== undefined) {
+    out("error: --name goes with --pair");
     return 1;
   }
-
-  if (!TOKEN_SHAPE.test(token)) {
-    out("error: that token is malformed: it must be one line of printable characters, as `token add` printed it");
-    return 1;
+  // With --pair the token does not exist yet: the code is only redeemed once the changes are confirmed,
+  // so a dry run or a "no" leaves the code unused and no stray token on the server.
+  let token = pair !== undefined ? undefined : (values.token ?? env.AGENTTASK_TOKEN ?? readToken(store, env));
+  if (pair === undefined) {
+    if (!token && interactive) token = await ask("Token (from `agenttaskservice token add <name>` on the server; not shown): ", true);
+    if (!token) {
+      out("error: give the token in AGENTTASK_TOKEN (or --token, which your shell history keeps), or use --pair CODE");
+      return 1;
+    }
+    if (!TOKEN_SHAPE.test(token)) {
+      out("error: that token is malformed: it must be one line of printable characters, as `token add` printed it");
+      return 1;
+    }
   }
   try {
-    const health = await getJson({ url, token, timeoutMs: 5000 }, "/health");
+    const health = await getJson({ url, token: token ?? "", timeoutMs: 5000 }, "/health");
     if (health.status !== "ok") throw new Error("unexpected /health reply");
-    await callTool({ url, token, timeoutMs: 5000 }, "list_projects", {});
+    if (token) await callTool({ url, token, timeoutMs: 5000 }, "list_projects", {});
   } catch (e) {
     out(`error: ${e instanceof Refused ? `the server refused the token (${e.message})` : `cannot reach ${url} (${(e as Error).message})`}`);
     return 1;
   }
-  out(`Server ${url} is reachable and accepts the token.`);
+  out(token ? `Server ${url} is reachable and accepts the token.` : `Server ${url} is reachable.`);
 
   const watch = [...new Set([...current.watch, ...(values.watch ?? []), ...(values.work && every > 0 ? [values.work] : [])])];
   const cfg: ClientConfig = {
@@ -212,7 +235,18 @@ export async function runInit(argv: string[], out: Out = console.log, env: Env =
   }
   const steps: Step[] = [];
 
-  if (readToken(store, { ...env, AGENTTASK_TOKEN: undefined }) !== token) {
+  if (pair !== undefined) {
+    steps.push({
+      what: `Trade the pairing code for a new token${values.name ? ` named ${values.name}` : ""}`,
+      apply: async () => {
+        const got = await redeemPairCode(url!, pair, values.name);
+        if (!TOKEN_SHAPE.test(got.token)) throw new Error("the server sent a malformed token");
+        token = got.token;
+        out(`  The server created the token "${got.name}".`);
+      },
+    });
+  }
+  if (pair !== undefined || readToken(store, { ...env, AGENTTASK_TOKEN: undefined }) !== token) {
     steps.push({ what: `Store the token in ${store === "file" ? "a file readable only by you" : `the ${store} store`}`, apply: () => writeToken(store, token!, env) });
   }
   if (JSON.stringify(cfg) !== JSON.stringify({ ...current, url: current.url, tokenStore: store }) || !existsSync(clientConfigPath(env))) {
@@ -308,10 +342,14 @@ export async function runInit(argv: string[], out: Out = console.log, env: Env =
   }
   for (const s of steps) {
     try {
-      s.apply();
+      await s.apply();
     } catch (e) {
       // Belt and braces: no step's error may echo the token.
-      out(`error: ${s.what} failed: ${redact((e as Error).message, token)}`);
+      const msg = token ? redact((e as Error).message, token) : (e as Error).message;
+      out(`error: ${s.what} failed: ${msg}`);
+      if (token && pair !== undefined && s.what.startsWith("Store the token")) {
+        out("The new token was created on the server but not saved here. Revoke it there (`token revoke`) and pair again.");
+      }
       return 1;
     }
   }
